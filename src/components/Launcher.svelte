@@ -1,6 +1,29 @@
-<script>
+<script lang="ts" context="module">
+  declare global {
+    interface Window {
+      flowkit?: {
+        listSharedDrives: () => Promise<any>;
+        listSharedWithMe: () => Promise<any>;
+        listFolder: (id: string) => Promise<any>;
+        searchSheets: (query: string) => Promise<any>;
+        getAuthStatus: () => Promise<any>;
+        getTemplates: () => Promise<any>;
+        getFormatLinks: () => Promise<any>;
+        createFlowFromTemplate: (opts: any) => Promise<any>;
+        createFlowSheet: (opts: any) => Promise<any>;
+        openSheet: (url: string) => void;
+        startAuth: () => Promise<any>;
+        logout: () => Promise<any>;
+        onAuthComplete: (cb: (data: any) => void) => () => void;
+      };
+    }
+  }
+</script>
+
+<script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { launcherOpen } from '../stores/uiState.js';
+  import { launcherOpen, launcherNewFormat, launcherMode } from '../stores/uiState.js';
+  import { currentSheetUrl } from '../stores/sheetState.js';
   import { authState } from '../stores/auth.js';
 
   // ── constants ─────────────────────────────────────────────────────────────
@@ -23,6 +46,16 @@
   let search       = '';
   let searchInput;
   let unsubAuth;
+
+  // ── new flow form state ───────────────────────────────────────────────────
+  let showNewFlow    = false;
+  let newFlowName    = '';
+  let newFlowFormat  = 'Policy';
+  let creating       = false;
+  let createError    = '';
+  let newFlowInput;
+  let userTemplates  = [];   // user-uploaded .xlsx templates
+  let formatLinks    = { Policy: null, LD: null, PF: null };
 
   $: loc      = stack[stack.length - 1] ?? null;   // null = home
   $: isHome   = loc === null;
@@ -76,8 +109,13 @@
   async function navigate(entry) {
     stack = [...stack, entry];
     await loadLocation(entry);
-    // Focus the search box after navigating into a folder
-    if (searchInput) setTimeout(() => searchInput?.focus(), 50);
+    if ($launcherMode === 'new-flow' && entry.type !== 'sharedWithMe') {
+      // Auto-open the new flow form; reset mode so further navigation doesn't re-trigger
+      launcherMode.set('open');
+      openNewFlowForm();
+    } else if (searchInput) {
+      setTimeout(() => searchInput?.focus(), 50);
+    }
   }
 
   async function navigateTo(index) {
@@ -92,6 +130,7 @@
     const url = (isXlsx(file) && file.webViewLink)
       ? file.webViewLink
       : `https://docs.google.com/spreadsheets/d/${file.id}/edit`;
+    currentSheetUrl.set(url);   // update the Svelte store so the back button appears
     window.flowkit?.openSheet(url);
     launcherOpen.set(false);
   }
@@ -102,6 +141,141 @@
     } else if (isFolder(item)) {
       navigate({ id: item.id, name: item.name, type: 'folder', driveId: loc?.driveId ?? null });
     }
+  }
+
+  // -- keyboard navigation state --
+  let selectedIndex = 0;
+
+  // Create a unified list of navigable items based on the current view
+  $: navItems = isHome 
+    ? [
+        { id: 'root', name: 'My Drive', type: 'folder', driveId: null },
+        { id: 'sharedWithMe', name: 'Shared with me', type: 'sharedWithMe', driveId: null },
+        ...sharedDrives.map(d => ({ ...d, type: 'drive', driveId: d.id }))
+      ]
+    : filtered;
+
+  // Reset selection when navigation or search happens
+  $: if (navItems || search) {
+    selectedIndex = 0;
+  }
+
+  function handleKeydown(e) {
+    // If typing in the flow name input, don't navigate the list
+    if (showNewFlow && document.activeElement === newFlowInput) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      selectedIndex = Math.min(selectedIndex + 1, navItems.length - 1);
+      scrollSelectedIntoView();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      selectedIndex = Math.max(selectedIndex - 1, 0);
+      scrollSelectedIntoView();
+    } else if (e.key === 'Enter') {
+      const item = navItems[selectedIndex];
+      if (item) {
+        if (isHome) {
+          navigate(item);
+        } else {
+          clickItem(item);
+        }
+      }
+    } else if (e.key === 'Escape') {
+      if (showNewFlow) { cancelNewFlow(); return; }
+      if (stack.length > 0) navigateTo(stack.length - 2);
+      else launcherOpen.set(false);
+    }
+  }
+
+  function scrollSelectedIntoView() {
+    // Small delay to ensure the DOM has updated classes
+    setTimeout(() => {
+      const selectedEl = document.querySelector('.file-row.selected');
+      if (selectedEl) {
+        selectedEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    }, 10);
+  }
+  
+
+  // ── new flow creation ─────────────────────────────────────────────────────
+  async function openNewFlowForm() {
+    newFlowName   = '';
+    newFlowFormat = $launcherNewFormat;  // pre-seeded by template click on home screen
+    createError   = '';
+    showNewFlow   = true;
+    // Load user templates + format links so the dropdown is populated
+    if (window.flowkit) {
+      [userTemplates, formatLinks] = await Promise.all([
+        window.flowkit.getTemplates(),
+        window.flowkit.getFormatLinks(),
+      ]);
+    }
+    setTimeout(() => newFlowInput?.focus(), 50);
+  }
+
+  function cancelNewFlow() {
+    showNewFlow = false;
+    createError = '';
+  }
+
+  async function submitNewFlow() {
+    const name = newFlowName.trim();
+    if (!name) { createError = 'name required'; return; }
+    if (!loc)  { createError = 'navigate into a folder first'; return; }
+
+    creating    = true;
+    createError = '';
+    try {
+      let file;
+
+      // Path 1: selected format is a user template ID → upload that .xlsx
+      const selectedUserTemplate = userTemplates.find(t => t.id === newFlowFormat);
+
+      if (selectedUserTemplate) {
+        file = await window.flowkit.createFlowFromTemplate({
+          name,
+          folderId: loc.id,
+          filePath: selectedUserTemplate.filePath,
+        });
+      } else {
+        // Path 2: built-in format has a linked custom template → upload that .xlsx
+        const linkedId       = formatLinks[newFlowFormat];
+        const linkedTemplate = linkedId ? userTemplates.find(t => t.id === linkedId) : null;
+
+        if (linkedTemplate) {
+          file = await window.flowkit.createFlowFromTemplate({
+            name,
+            folderId: loc.id,
+            filePath: linkedTemplate.filePath,
+          });
+        } else {
+          // Path 3: no custom template — use Sheets API with column headers
+          file = await window.flowkit.createFlowSheet({
+            name,
+            folderId: loc.id,
+            format:   newFlowFormat,
+          });
+        }
+      }
+
+      await loadLocation(loc);
+      showNewFlow = false;
+      const url = `https://docs.google.com/spreadsheets/d/${file.id}/edit`;
+      currentSheetUrl.set(url);   // update store so the back button appears
+      window.flowkit?.openSheet(url);
+      launcherOpen.set(false);
+    } catch (e) {
+      createError = e.message || 'failed to create';
+    } finally {
+      creating = false;
+    }
+  }
+
+  function onNewFlowKeydown(e) {
+    if (e.key === 'Enter') submitNewFlow();
+    if (e.key === 'Escape') cancelNewFlow();
   }
 
   // ── sign in ───────────────────────────────────────────────────────────────
@@ -120,14 +294,17 @@
     }
   }
 
-  // ── keyboard / overlay ────────────────────────────────────────────────────
-  function onKeydown(e) {
-    if (e.key === 'Escape') {
-      if (stack.length > 0) navigateTo(stack.length - 2);
-      else launcherOpen.set(false);
-    }
+  async function signOut() {
+    if (!window.flowkit) return;
+    await window.flowkit.logout();
+    authState.set({ loggedIn: false, userInfo: null });
+    stack        = [];
+    items        = [];
+    sharedDrives = [];
+    showNewFlow  = false;
   }
 
+  // ── keyboard / overlay ────────────────────────────────────────────────────
   function onOverlayClick(e) {
     if (e.target === e.currentTarget) launcherOpen.set(false);
   }
@@ -145,13 +322,18 @@
     });
   });
 
-  onDestroy(() => { if (unsubAuth) unsubAuth(); });
+  onDestroy(() => {
+    if (unsubAuth) unsubAuth();
+    launcherMode.set('open'); // always reset mode when launcher closes
+  });
+
+  
 </script>
 
-<svelte:window on:keydown={onKeydown} />
+<svelte:window on:keydown={handleKeydown} />
 
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
-<div class="overlay" role="dialog" aria-modal="true" on:click={onOverlayClick}>
+<div class="overlay" role="dialog" aria-modal="true" tabindex="0" on:click={onOverlayClick}>
   <div class="modal">
 
     <!-- ── header ──────────────────────────────────────────────────────── -->
@@ -169,7 +351,7 @@
           {/each}
         </nav>
       {:else}
-        <span class="modal-title">open sheet</span>
+        <span class="modal-title">{$launcherMode === 'new-flow' ? 'select folder for new flow' : 'open sheet'}</span>
       {/if}
       <button class="close-btn" on:click={() => launcherOpen.set(false)} aria-label="Close">✕</button>
     </div>
@@ -193,42 +375,30 @@
       <div class="state-msg error-text">{error}</div>
 
     {:else if isHome}
-      <!-- ── home view ──────────────────────────────────────────────── -->
       <ul class="file-list">
-        <li>
-          <button class="file-row nav-row"
-            on:click={() => navigate({ id: 'root', name: 'My Drive', type: 'folder', driveId: null })}>
-            <span class="row-icon drive-icon">▸</span>
-            <span class="file-name">My Drive</span>
-            <span class="chevron">›</span>
-          </button>
-        </li>
-        <li>
-          <button class="file-row nav-row"
-            on:click={() => navigate({ id: 'sharedWithMe', name: 'Shared with me', type: 'sharedWithMe', driveId: null })}>
-            <span class="row-icon shared-icon">▸</span>
-            <span class="file-name">Shared with me</span>
-            <span class="chevron">›</span>
-          </button>
-        </li>
+        {#each navItems as item, i}
+          {#if item.type === 'drive' && (i === 0 || navItems[i-1].type !== 'drive')}
+            <li class="section-sep"><span>shared drives</span></li>
+          {/if}
 
-        {#if sharedDrives.length > 0}
-          <li class="section-sep"><span>shared drives</span></li>
-          {#each sharedDrives as drive (drive.id)}
-            <li>
-              <button class="file-row nav-row"
-                on:click={() => navigate({ id: drive.id, name: drive.name, type: 'drive', driveId: drive.id })}>
-                <span class="row-icon drive-icon">▸</span>
-                <span class="file-name">{drive.name}</span>
-                <span class="chevron">›</span>
-              </button>
-            </li>
-          {/each}
-        {/if}
+          <li>
+            <button 
+              class="file-row nav-row"
+              class:selected={selectedIndex === i} 
+              on:click={() => navigate(item)}
+            >
+              <span class="row-icon" 
+                class:drive-icon={item.type === 'folder' || item.type === 'drive'}
+                class:shared-icon={item.type === 'sharedWithMe'}
+              >▸</span>
+              <span class="file-name">{item.name}</span>
+              <span class="chevron">›</span>
+            </button>
+          </li>
+        {/each}
       </ul>
 
     {:else}
-      <!-- ── folder / sharedWithMe view ───────────────────────────────── -->
       <div class="search-wrap">
         <input
           bind:this={searchInput}
@@ -239,15 +409,59 @@
           spellcheck="false"
           autocomplete="off"
         />
+        {#if loc && loc.type !== 'sharedWithMe'}
+          <button class="new-flow-btn" on:click={openNewFlowForm}>
+            + new flow
+          </button>
+        {/if}
       </div>
+
+      {#if showNewFlow}
+        <div class="new-flow-form">
+          <input
+            bind:this={newFlowInput}
+            type="text"
+            class="nf-input"
+            bind:value={newFlowName}
+            placeholder="flow name…"
+            on:keydown={onNewFlowKeydown}
+          />
+          <div class="nf-row">
+            <select class="nf-select" bind:value={newFlowFormat}>
+              <optgroup label="Default formats">
+                <option value="Policy">Policy</option>
+                <option value="LD">LD</option>
+                <option value="PF">PF</option>
+              </optgroup>
+              {#if userTemplates.length > 0}
+                <optgroup label="Custom templates">
+                  {#each userTemplates as tmpl}
+                    <option value={tmpl.id}>{tmpl.name}</option>
+                  {/each}
+                </optgroup>
+              {/if}
+            </select>
+            <button class="nf-create" on:click={submitNewFlow} disabled={creating}>
+              {creating ? 'creating…' : 'create'}
+            </button>
+            <button class="nf-cancel" on:click={cancelNewFlow}>cancel</button>
+          </div>
+          {#if createError}<p class="nf-error">{createError}</p>{/if}
+        </div>
+      {/if}
 
       {#if filtered.length === 0}
         <div class="state-msg">{search ? 'no matches' : 'nothing here'}</div>
       {:else}
         <ul class="file-list">
-          {#each filtered as item (item.id)}
+          {#each filtered as item, i}
             <li>
-              <button class="file-row" class:nav-row={isFolder(item)} on:click={() => clickItem(item)}>
+              <button 
+                class="file-row" 
+                class:nav-row={isFolder(item)} 
+                class:selected={selectedIndex === i}
+                on:click={() => clickItem(item)}
+              >
                 <span class="row-icon"
                   class:folder-icon={isFolder(item)}
                   class:sheet-icon={isSheet(item) && !isXlsx(item)}
@@ -264,6 +478,14 @@
           {/each}
         </ul>
       {/if}
+    {/if}
+
+    <!-- ── footer: sign out ──────────────────────────────────────────── -->
+    {#if $authState.loggedIn}
+      <div class="modal-footer">
+        <span class="footer-email">{$authState.userInfo?.email ?? ''}</span>
+        <button class="signout-btn" on:click={signOut}>sign out</button>
+      </div>
     {/if}
 
   </div>
@@ -373,6 +595,9 @@
     padding: 8px 10px;
     border-bottom: 1px solid #181818;
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
   .search-input {
@@ -397,6 +622,7 @@
     overflow-y: auto;
     flex: 1;
     padding: 3px 0;
+    scroll-behavior: smooth;
   }
   .file-list li { display: contents; }
 
@@ -406,20 +632,45 @@
     align-items: center;
     gap: 8px;
     padding: 7px 14px;
+    /* add a transparent border to prevent layout shifts on selection */
+    border-left: 3px solid transparent; 
     background: none;
-    border: none;
+    border-top: none;
+    border-right: none;
+    border-bottom: none;
     color: #d0d0d0;
     font-size: 0.82rem;
     font-family: inherit;
     text-align: left;
     cursor: pointer;
-    transition: background 0.08s;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
   }
-  .file-row:hover { background: #181818; }
 
-  /* navigable rows (folders, drives) are slightly dimmer by default */
+  /* ── the "pro" selection state ────────────────────────────────────────── */
+  .file-row.selected {
+    background: linear-gradient(90deg, #1a1a2e 0%, #111 100%);
+    border-left-color: #646cff; /* matching your caret color */
+    color: #ffffff;
+    outline: none; /* remove default browser focus ring */
+  }
+
+  .file-row.selected .chevron {
+    color: #888;
+  }
+
+  .file-row.selected .file-date {
+    color: #666;
+  }
+
+  /* ensure hover and selected play nice together */
+  .file-row:hover:not(.selected) { 
+    background: #181818; 
+    border-left-color: #252525;
+  }
+
+  /* navigable rows (folders, drives) */
   .nav-row { color: #aaa; }
-  .nav-row:hover { color: #d0d0d0; }
+  .nav-row:hover, .nav-row.selected { color: #fff; }
 
   /* ── row icons (CSS squares) ──────────────────────────────────────────── */
   .row-icon {
@@ -516,4 +767,131 @@
   .sign-in-btn:disabled { opacity: 0.5; cursor: default; }
 
   .error-text { color: #ef4444; font-size: 0.75rem; }
+
+  /* ── modal footer ────────────────────────────────────────────────────────── */
+  .modal-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px;
+    border-top: 1px solid #1a1a1a;
+    flex-shrink: 0;
+  }
+
+  .footer-email {
+    color: #3a3a5a;
+    font-size: 0.68rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .signout-btn {
+    background: none;
+    border: none;
+    color: #3a3a5a;
+    font-size: 0.68rem;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 2px 4px;
+    transition: color 0.12s;
+    flex-shrink: 0;
+  }
+  .signout-btn:hover { color: #ef4444; }
+
+  /* ── search row with new flow button ────────────────────────────────────── */
+  .search-wrap .search-input { flex: 1; }
+
+  .new-flow-btn {
+    flex-shrink: 0;
+    background: none;
+    border: 1px solid #2a2a4a;
+    border-radius: 4px;
+    color: #6666bb;
+    font-size: 0.72rem;
+    font-family: inherit;
+    padding: 4px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color 0.12s, color 0.12s, background 0.12s;
+  }
+  .new-flow-btn:hover { border-color: #4444aa; color: #9999dd; background: #111827; }
+
+  /* ── new flow form ───────────────────────────────────────────────────────── */
+  .new-flow-form {
+    padding: 10px 10px 6px;
+    border-bottom: 1px solid #181818;
+    background: #0d0d1a;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .nf-input {
+    width: 100%;
+    background: #0a0a0a;
+    border: 1px solid #2a2a4a;
+    border-radius: 4px;
+    padding: 6px 10px;
+    color: #e2e2e2;
+    font-size: 0.82rem;
+    font-family: inherit;
+    outline: none;
+    caret-color: #646cff;
+    transition: border-color 0.12s;
+    box-sizing: border-box;
+  }
+  .nf-input:focus { border-color: #4444aa; }
+  .nf-input::placeholder { color: #333; }
+
+  .nf-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .nf-select {
+    background: #0a0a0a;
+    border: 1px solid #252535;
+    border-radius: 4px;
+    color: #aaa;
+    font-size: 0.78rem;
+    font-family: inherit;
+    padding: 4px 8px;
+    outline: none;
+    cursor: pointer;
+  }
+  .nf-select:focus { border-color: #3a3a6a; }
+
+  .nf-create {
+    background: #111827;
+    border: 1px solid #2a2a4a;
+    border-radius: 4px;
+    color: #8888cc;
+    font-size: 0.78rem;
+    font-family: inherit;
+    padding: 4px 14px;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .nf-create:hover:not(:disabled) { background: #161b30; border-color: #4a4aaa; color: #aaaaee; }
+  .nf-create:disabled { opacity: 0.45; cursor: default; }
+
+  .nf-cancel {
+    background: none;
+    border: none;
+    color: #444;
+    font-size: 0.78rem;
+    font-family: inherit;
+    padding: 4px 8px;
+    cursor: pointer;
+    transition: color 0.12s;
+  }
+  .nf-cancel:hover { color: #888; }
+
+  .nf-error {
+    color: #ef4444;
+    font-size: 0.72rem;
+    margin: 0;
+  }
 </style>

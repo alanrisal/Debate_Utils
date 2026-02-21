@@ -200,3 +200,33 @@ npm test
 - [mammoth.js docs](https://github.com/mwilliamson/mammoth.js)
 - [Fuse.js docs](https://www.fusejs.io/)
 - [electron-builder docs](https://www.electron.build/)
+
+## UPDATES MUST READ 2/19/26
+
+Some new updates as of recently!
+- Added full drive support and now I just made sure the API allows to edit and create files in google drive -- So using that our next step is to allow people to create new flows within their folders in drive all from our platform 
+
+- after we've done that -- -we need to make sure that the functionality features in our top bar are all useful, so you can paste a spreadsheet URL, you can make a new sheet -- or do a bunch of commands from our control bar 
+
+- finally we need to set up tubs --- this will be where people can upload files like 1AR block files or other blocks etc -- right now we just need a clean way to incorporate the block files into the sytem, we don tneed to create the classifiers yet 
+
+# UPDATES *! 2/21/26 1:10am
+
+Alright, where are we right now -- Read and write to google drive and sheets is compelte -- custom template selection has been established 
+
+STEPS FORWARD
+
+--- First thing to setup - 
+A. Better dialogue for the function N make a new flow, you should get the drive popup but it should say select folder for new flow and then open the new flow box once the folder is selected instead of jsut doing the regular opening of the drive (low prioroity just simple to get out of the way and make sure UI is clean before moving forward)
+
+B. We need to implement buttons to add new FLOW SHEETS (aff, neg) which is a core functionality:
+
+Native Button → Sheet Mutation Pattern
+To add buttons outside the embedded Google Sheets view that modify the sheet, use a three-layer IPC bridge:
+
+Svelte UI — button calls window.flowkit.someAction(spreadsheetId) via the preload bridge
+Preload script — exposes the method via contextBridge.exposeInMainWorld('flowkit', { someAction: (id) => ipcRenderer.invoke('some-action', id) })
+Main process — registers ipcMain.handle('some-action', async (e, id) => { ... }) and calls the Google Sheets API via the googleapis Node SDK using the already-authenticated OAuth client
+
+The embedded WebContentsView is then reloaded after the API call completes so it reflects the change. All auth/credentials stay in the main process and never touch the renderer. New sheet actions (add tab, pre-fill headers, apply formatting) follow this same pattern — just extend the flowkit bridge with a new method name and a corresponding ipcMain.handle on the other end. Sonnet 4.6
+

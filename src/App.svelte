@@ -1,8 +1,10 @@
 <script>
   import { onMount } from 'svelte';
-  import Toolbar from './components/Toolbar.svelte';
+  import Toolbar  from './components/Toolbar.svelte';
   import Launcher from './components/Launcher.svelte';
+  import Home     from './components/Home.svelte';
   import { launcherOpen } from './stores/uiState.js';
+  import { currentSheetUrl } from './stores/sheetState.js';
 
   let panelOpen = false;
 
@@ -44,6 +46,10 @@
         <span class="sub">coming soon — ctrl+k to toggle</span>
       </div>
     </aside>
+  {/if}
+
+  {#if !$currentSheetUrl}
+    <Home />
   {/if}
 
   {#if $launcherOpen}

@@ -1,244 +1,481 @@
 <script>
+  import { fly, fade } from 'svelte/transition';
   import { currentSheetUrl } from '../stores/sheetState.js';
   import { authState } from '../stores/auth.js';
-  import { launcherOpen } from '../stores/uiState.js';
+  import { launcherOpen, launcherMode, sheetFormat } from '../stores/uiState.js';
 
-  let inputValue = '';
-  let error = '';
+  let inputValue    = '';
+  let error         = '';
+  let isFocused     = false;
+  let selectedIndex = 0;
 
-  function openSheet() {
-    const url = inputValue.trim();
-    if (!url) return;
+  // ── Search mode (input starts with '/') ───────────────────────────────────
+  let searchResults = [];
+  let searching     = false;
+  let searchTimeout;
 
-    if (!url.includes('docs.google.com/spreadsheets')) {
-      error = 'paste a google sheets URL';
-      setTimeout(() => (error = ''), 2000);
+  $: isSearching = inputValue.startsWith('/');
+
+  $: if (isSearching) {
+    const query = inputValue.slice(1).trim();
+    if (query.length > 1) {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => performSearch(query), 300);
+    } else {
+      searchResults = [];
+    }
+  } else {
+    searchResults = [];
+  }
+
+  async function performSearch(query) {
+    if (!window.flowkit?.searchSheets) return;
+    searching = true;
+    try {
+      searchResults = await window.flowkit.searchSheets(query);
+      selectedIndex = 0;
+    } catch (e) {
+      searchResults = [];
+    } finally {
+      searching = false;
+    }
+  }
+
+  function openSearchResult(file) {
+    const url = `https://docs.google.com/spreadsheets/d/${file.id}/edit`;
+    currentSheetUrl.set(url);
+    window.flowkit?.openSheet(url);
+    inputValue    = '';
+    isFocused     = false;
+    searchResults = [];
+  }
+
+  // Move the native sheet view off-screen whenever the palette dropdown is visible.
+  $: window.flowkit?.togglePalette(isFocused && (!inputValue || isSearching));
+
+  // ── Commands ──────────────────────────────────────────────────────────────
+  function goHome() {
+    currentSheetUrl.set('');
+    window.flowkit?.goHome();
+  }
+
+  $: commands = [
+    ...($currentSheetUrl ? [{ id: 'home', label: 'go to home', shortcut: 'B', action: goHome }] : []),
+    { id: 'open', label: 'open drive library', shortcut: 'O', action: () => { launcherMode.set('open');     launcherOpen.set(true); } },
+    { id: 'new',  label: 'create new flow',    shortcut: 'N', action: () => { launcherMode.set('new-flow'); launcherOpen.set(true); } },
+    { id: 'exit', label: 'terminate session',  shortcut: '⎋', action: () => window.flowkit?.closeWindow() },
+    { id: 'select', label: 'find specific sheet', shortcut: '/', action: () => { inputValue = '/'; isFocused = true; setTimeout(() => document.getElementById('topbar-input')?.focus(), 0); } },
+  ];
+
+  // ── Single keydown handler (on window) ────────────────────────────────────
+  function handleGlobalKeydown(e) {
+    const tag      = document.activeElement?.tagName;
+    const isTyping = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
+    // '>' toggles the palette from anywhere outside an existing input
+    if (e.key === '>' && !isTyping) {
+      e.preventDefault();
+      if (isFocused) {
+        isFocused     = false;
+        inputValue    = '';
+        searchResults = [];
+      } else {
+        isFocused     = true;
+        selectedIndex = 0;
+        setTimeout(() => document.getElementById('topbar-input')?.focus(), 0);
+      }
       return;
     }
 
-    error = '';
-    currentSheetUrl.set(url);
-    window.flowkit?.openSheet(url);
-  }
+    if (!isFocused) return;
 
-  function onKeydown(e) {
-    if (e.key === 'Enter') openSheet();
-    if (e.key === 'Escape') {
-      inputValue = '';
-      error = '';
-      e.currentTarget.blur();
+    const activeList = isSearching ? searchResults : commands;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (activeList.length) selectedIndex = (selectedIndex + 1) % activeList.length;
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (activeList.length) selectedIndex = (selectedIndex - 1 + activeList.length) % activeList.length;
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (isSearching) {
+        if (searchResults[selectedIndex]) openSearchResult(searchResults[selectedIndex]);
+      } else if (!inputValue) {
+        commands[selectedIndex]?.action();
+        isFocused = false;
+      } else {
+        processUrl();
+      }
+    } else if (e.key === 'Escape') {
+      isFocused     = false;
+      inputValue    = '';
+      searchResults = [];
+    } else if (!inputValue && !isSearching) {
+      // Single-letter shortcuts when palette is open with no text typed
+      switch (e.key.toLowerCase()) {
+        case 'o': e.preventDefault(); commands.find(c => c.id === 'open')?.action(); isFocused = false; break;
+        case 'n': e.preventDefault(); commands.find(c => c.id === 'new')?.action();  isFocused = false; break;
+        case 'b': e.preventDefault(); commands.find(c => c.id === 'home')?.action(); isFocused = false; break;
+      }
     }
   }
 
-  function truncateEmail(email) {
-    if (!email) return '';
-    if (email.length <= 22) return email;
-    const [local, domain] = email.split('@');
-    return local.slice(0, 10) + '…@' + domain;
+  // ── URL paste ─────────────────────────────────────────────────────────────
+  function processUrl() {
+    const url = inputValue.trim();
+    if (url.includes('docs.google.com/spreadsheets')) {
+      currentSheetUrl.set(url);
+      window.flowkit?.openSheet(url);
+      inputValue = '';
+      isFocused  = false;
+    } else {
+      error = 'invalid source';
+      setTimeout(() => (error = ''), 2000);
+    }
+  }
+
+  // ── Format cycler + Aff / Neg tab buttons ─────────────────────────────────
+  const FORMAT_CYCLE = ['Policy', 'LD', 'PF'];
+  let addingTab = false;
+
+  function cycleFormat() {
+    sheetFormat.update(f => FORMAT_CYCLE[(FORMAT_CYCLE.indexOf(f) + 1) % FORMAT_CYCLE.length]);
+  }
+
+  async function addTab(tabName) {
+    const match = $currentSheetUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    const spreadsheetId = match?.[1];
+    if (!spreadsheetId || !window.flowkit) return;
+    addingTab = true;
+    try {
+      await window.flowkit.addFlowTab({ spreadsheetId, tabName, format: $sheetFormat });
+    } catch (e) {
+      error = e.message || 'failed to add tab';
+      setTimeout(() => (error = ''), 2500);
+    } finally {
+      addingTab = false;
+    }
   }
 </script>
 
-<header class="toolbar">
-  <span class="logo">flowkit</span>
+<svelte:window on:keydown={handleGlobalKeydown} />
 
-  <div class="url-bar-wrap">
-    <input
-      type="text"
-      class="url-bar"
-      class:error
-      bind:value={inputValue}
-      on:keydown={onKeydown}
-      placeholder="paste a Google Sheets URL and press Enter…"
-      spellcheck="false"
-      autocomplete="off"
-    />
-    {#if error}
-      <span class="error-msg">{error}</span>
+<header class="orchestrator">
+
+  <!-- ── Left: meta / sheet controls ──────────────────────────────────── -->
+  <div class="meta">
+    {#if $currentSheetUrl}
+      <button class="home-btn" on:click={goHome}>
+        <span class="home-arrow">←</span>
+        <span class="home-label">home</span>
+      </button>
+      <div class="sheet-controls" class:busy={addingTab}>
+        <button class="fmt-btn" on:click={cycleFormat} title="Click to cycle format">
+          {$sheetFormat.toLowerCase()}
+        </button>
+        <button class="tab-btn" on:click={() => addTab('Aff')} disabled={addingTab}>+aff</button>
+        <button class="tab-btn" on:click={() => addTab('Neg')} disabled={addingTab}>+neg</button>
+      </div>
+    {:else}
+      <span class="system-status"></span>
+      <span class="app-name">flowkit <span class="version">v1.0.4</span></span>
     {/if}
   </div>
 
-  <!-- Drive button / auth status -->
-  <button
-    class="drive-btn"
-    class:connected={$authState.loggedIn}
-    on:click={() => launcherOpen.set(true)}
-    aria-label={$authState.loggedIn ? 'Open Drive file picker' : 'Connect Google Drive'}
-    title={$authState.loggedIn && $authState.userInfo ? $authState.userInfo.email : ''}
-  >
-    {#if $authState.loggedIn && $authState.userInfo}
-      <span class="user-email">{truncateEmail($authState.userInfo.email)}</span>
-    {:else}
-      <span>connect drive</span>
+  <!-- ── Center: commander ─────────────────────────────────────────────── -->
+  <div class="commander" class:active={isFocused}>
+    <div class="input-wrapper">
+      <span class="prompt">$</span>
+      <input
+        id="topbar-input"
+        type="text"
+        bind:value={inputValue}
+        on:focus={() => { isFocused = true; }}
+        on:blur={() => setTimeout(() => { isFocused = false; }, 200)}
+        placeholder={isFocused ? 'select command, paste link, or / to search…' : '> open commands'}
+        spellcheck="false"
+      />
+      {#if error}
+        <span class="error-tag" transition:fade>{error}</span>
+      {/if}
+    </div>
+
+    {#if isFocused && (!inputValue || isSearching)}
+      <div class="palette" in:fly={{ y: -5, duration: 100 }}>
+        {#if isSearching}
+          {#if searching}
+            <div class="palette-msg">searching drive…</div>
+          {:else if searchResults.length > 0}
+            {#each searchResults as file, i}
+              <!-- svelte-ignore a11y-click-events-have-key-events -->
+              <button
+                class="palette-item"
+                class:selected={i === selectedIndex}
+                on:click={() => openSearchResult(file)}
+                on:mouseenter={() => (selectedIndex = i)}
+              >
+                <span class="cmd-label"><span class="file-icon">⊞</span>{file.name}</span>
+                <span class="cmd-shortcut">open</span>
+              </button>
+            {/each}
+          {:else if inputValue.length > 1}
+            <div class="palette-msg">no sheets found for "{inputValue.slice(1)}"</div>
+          {:else}
+            <div class="palette-msg">type to search your drive…</div>
+          {/if}
+        {:else}
+          {#each commands as cmd, i}
+            <!-- svelte-ignore a11y-click-events-have-key-events -->
+            <button
+              class="palette-item"
+              class:selected={i === selectedIndex}
+              on:click={cmd.action}
+              on:mouseenter={() => (selectedIndex = i)}
+            >
+              <span class="cmd-label">{cmd.label}</span>
+              <span class="cmd-shortcut">{cmd.shortcut}</span>
+            </button>
+          {/each}
+        {/if}
+      </div>
     {/if}
-  </button>
+  </div>
 
-  <span class="hint">
-    <kbd>ctrl</kbd><kbd>k</kbd> blocks
-  </span>
+  <!-- ── Right: identity ───────────────────────────────────────────────── -->
+  <div class="identity">
+    {#if $authState.loggedIn}
+      <button class="user-pill" on:click={() => launcherOpen.set(true)}>
+        <span class="user-id">{$authState.userInfo?.email.split('@')[0]}</span>
+        <span class="status-online"></span>
+      </button>
+    {:else}
+      <button class="auth-trigger" on:click={() => launcherOpen.set(true)}>authenticate</button>
+    {/if}
+    <button class="close-trigger" on:click={() => window.flowkit?.closeWindow()}>
+      <div class="close-icon"></div>
+    </button>
+  </div>
 
-  <button class="close-btn" on:click={() => window.flowkit?.closeWindow()} aria-label="Close">
-    ✕
-  </button>
 </header>
 
 <style>
-  .toolbar {
+  :root {
+    --bg: #0a0a0a;
+    --surface: #121212;
+    --border: #262626;
+    --text-main: #e5e5e5;
+    --text-dim: #737373;
+    --accent: #ffffff;
+    --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+
+  .orchestrator {
     position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: var(--toolbar-h);
-    background: var(--toolbar-bg);
+    top: 0; left: 0; right: 0;
+    height: 38px;
+    background: var(--bg);
     border-bottom: 1px solid var(--border);
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 0 14px;
-    z-index: 100;
+    justify-content: space-between;
+    padding: 0 12px;
+    font-family: var(--font-mono);
     -webkit-app-region: drag;
+    z-index: 1000;
   }
 
-  /* ── Logo ── */
-  .logo {
-    font-size: 0.78rem;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    color: var(--subtext);
-    text-transform: lowercase;
-    flex-shrink: 0;
-    -webkit-app-region: no-drag;
-  }
-
-  /* ── URL bar ── */
-  .url-bar-wrap {
-    flex: 1;
-    position: relative;
-    -webkit-app-region: no-drag;
-  }
-
-  .url-bar {
-    width: 100%;
-    background: #0a0a0a;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 5px 10px;
-    color: var(--text);
-    font-size: 0.78rem;
-    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
-    outline: none;
-    transition: border-color 0.15s;
-    caret-color: var(--accent);
-  }
-
-  .url-bar:focus {
-    border-color: var(--muted);
-  }
-
-  .url-bar.error {
-    border-color: #7f1d1d;
-  }
-
-  .url-bar::placeholder {
-    color: var(--muted);
-    font-family: inherit;
-  }
-
-  .error-msg {
-    position: absolute;
-    right: 8px;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 0.68rem;
-    color: #ef4444;
-    pointer-events: none;
-  }
-
-  /* ── Drive button ── */
-  .drive-btn {
-    flex-shrink: 0;
-    background: #111;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    color: var(--muted);
-    font-size: 0.72rem;
-    font-family: inherit;
-    padding: 4px 10px;
-    height: 28px;
-    cursor: pointer;
+  /* ── Left ─────────────────────────────────────────────────────────────── */
+  .meta {
     display: flex;
     align-items: center;
-    gap: 6px;
-    transition: border-color 0.15s, color 0.15s, background 0.15s;
-    white-space: nowrap;
-    -webkit-app-region: no-drag;
+    gap: 8px;
+    min-width: 220px;
   }
 
-  .drive-btn:hover {
-    border-color: #3a3a3a;
-    color: var(--text);
-    background: #1a1a1a;
-  }
+  .system-status { width: 8px; height: 8px; border: 1px solid var(--text-dim); }
+  .app-name { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text-main); }
+  .version { color: var(--text-dim); font-weight: 400; margin-left: 4px; }
 
-  .drive-btn.connected {
-    border-color: #2a2a4a;
-    color: #9090ff;
-    background: #0d0d1e;
-  }
-
-  .drive-btn.connected:hover {
-    border-color: #3a3a6a;
-    background: #141428;
-  }
-
-  .user-email {
-    font-size: 0.7rem;
-    max-width: 160px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  /* ── Keyboard hint ── */
-  .hint {
+  .home-btn {
     display: flex;
     align-items: center;
-    gap: 3px;
-    flex-shrink: 0;
-    color: var(--muted);
-    font-size: 0.68rem;
-    -webkit-app-region: no-drag;
-  }
-
-  kbd {
-    background: #1e1e1e;
-    border: 1px solid var(--border);
+    gap: 5px;
+    background: #0f0f1a;
+    border: 1px solid #2a2a4a;
     border-radius: 3px;
-    padding: 1px 4px;
-    font-size: 0.65rem;
-    font-family: inherit;
-    color: var(--muted);
+    color: #8888cc;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 3px 9px 3px 7px;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+    -webkit-app-region: no-drag;
+  }
+  .home-btn:hover { background: #141426; border-color: #5555aa; color: #aaaaee; }
+  .home-arrow { font-size: 11px; line-height: 1; }
+  .home-label { text-transform: lowercase; letter-spacing: 0.06em; }
+
+  .sheet-controls {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    -webkit-app-region: no-drag;
+  }
+  .sheet-controls.busy { opacity: 0.55; pointer-events: none; }
+
+  .fmt-btn {
+    background: none;
+    border: 1px solid #252535;
+    border-radius: 2px;
+    color: #555577;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    padding: 2px 6px;
+    cursor: pointer;
+    text-transform: lowercase;
+    transition: border-color 0.12s, color 0.12s;
+  }
+  .fmt-btn:hover { border-color: #4444aa; color: #9999dd; }
+
+  .tab-btn {
+    background: none;
+    border: 1px solid #252535;
+    border-radius: 2px;
+    color: #666688;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    padding: 2px 7px;
+    cursor: pointer;
+    transition: border-color 0.12s, color 0.12s, background 0.12s;
+  }
+  .tab-btn:hover:not(:disabled) { border-color: #5555aa; color: #aaaaee; background: #0f0f1a; }
+  .tab-btn:disabled { opacity: 0.4; cursor: default; }
+
+  /* ── Center ───────────────────────────────────────────────────────────── */
+  .commander {
+    position: relative;
+    width: 400px;
+    flex-shrink: 0;
+    transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    -webkit-app-region: no-drag;
+  }
+  .commander.active { width: 480px; }
+
+  .input-wrapper {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    height: 26px;
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    gap: 8px;
   }
 
-  /* ── Close button ── */
-  .close-btn {
-    flex-shrink: 0;
+  .prompt { color: var(--text-dim); font-size: 12px; }
+
+  input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text-main);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    outline: none;
+  }
+  input::placeholder { color: var(--text-dim); text-transform: lowercase; }
+
+  .error-tag { color: #ff4545; font-size: 10px; text-transform: uppercase; }
+
+  /* ── Palette dropdown ─────────────────────────────────────────────────── */
+  .palette {
+    position: absolute;
+    top: 32px; left: 0; right: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
+    padding: 4px;
+    z-index: 10;
+  }
+
+  .palette-item {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
     background: none;
     border: none;
-    color: var(--muted);
-    font-size: 0.75rem;
-    line-height: 1;
-    width: 28px;
-    height: 28px;
-    border-radius: 4px;
+    font-family: var(--font-mono);
+    text-align: left;
     cursor: pointer;
+    border-radius: 2px;
+  }
+  .palette-item.selected { background: var(--accent); }
+  .palette-item.selected .cmd-label,
+  .palette-item.selected .cmd-shortcut { color: #000; }
+
+  .cmd-label   { color: var(--text-main); font-size: 11px; text-transform: lowercase; }
+  .cmd-shortcut { color: var(--text-dim);  font-size: 10px; }
+
+  .palette-msg {
+    padding: 8px 10px;
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: lowercase;
+  }
+
+  .file-icon { color: #1a73e8; margin-right: 6px; font-size: 12px; }
+
+  /* ── Right ────────────────────────────────────────────────────────────── */
+  .identity {
     display: flex;
     align-items: center;
-    justify-content: center;
-    transition: background 0.15s, color 0.15s;
+    gap: 16px;
+    min-width: 220px;
+    justify-content: flex-end;
     -webkit-app-region: no-drag;
   }
 
-  .close-btn:hover {
-    background: #3f1010;
-    color: #ef4444;
+  .user-pill {
+    background: none; border: none;
+    display: flex; align-items: center; gap: 8px;
+    cursor: pointer; padding: 4px;
   }
+  .user-id { color: var(--text-main); font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
+  .status-online { width: 4px; height: 4px; background: var(--accent); }
+
+  .auth-trigger {
+    background: transparent;
+    border: 1px solid var(--text-dim);
+    color: var(--text-dim);
+    font-size: 10px;
+    font-family: var(--font-mono);
+    padding: 2px 8px;
+    cursor: pointer;
+  }
+  .auth-trigger:hover { border-color: var(--accent); color: var(--accent); }
+
+  .close-trigger {
+    background: none; border: none; cursor: pointer;
+    width: 20px; height: 20px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .close-icon {
+    width: 10px; height: 1px;
+    background: var(--text-dim);
+    transform: rotate(45deg);
+    position: relative;
+  }
+  .close-icon::after {
+    content: '';
+    position: absolute;
+    width: 10px; height: 1px;
+    background: var(--text-dim);
+    transform: rotate(-90deg);
+  }
+  .close-trigger:hover .close-icon,
+  .close-trigger:hover .close-icon::after { background: #ff4545; }
 </style>

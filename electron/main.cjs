@@ -1,7 +1,8 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, globalShortcut, WebContentsView } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, WebContentsView, dialog } = require('electron');
 const path = require('path');
+const { randomUUID } = require('crypto');
 
 // Load .env before anything that reads process.env
 try {
@@ -13,9 +14,13 @@ try {
   }
 } catch { /* .env not found — env vars must be set externally */ }
 
-const { getTokens, setTokens, getUserInfo, setUserInfo, clearAll } = require('./store.cjs');
+const { getTokens, setTokens, getUserInfo, setUserInfo, clearAll,
+        getTemplates, saveTemplates, getTubs, saveTubs,
+        getFormatLinks, saveFormatLinks } = require('./store.cjs');
 const { startAuthFlow, buildClientFromTokens } = require('./auth.cjs');
-const { listFolder, listSharedWithMe, listSharedDrives } = require('./sheets-api.cjs');
+const { listFolder, listSharedWithMe, listSharedDrives,
+        createFlowSheet, createFlowFromTemplate, addFlowTab,
+        searchSheets } = require('./sheets-api.cjs');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -27,18 +32,20 @@ const TOOLBAR_HEIGHT = 48;   // px — matches Toolbar.svelte height
 let mainWindow      = null;
 let sheetView       = null;
 let panelOpen       = false;
-let launcherIsOpen  = false;   // tracks whether the Drive launcher modal is showing
+let launcherIsOpen  = false;   // Drive launcher overlay is open
+let paletteIsOpen   = false;   // command palette dropdown is open
+let sheetActive     = false;   // a sheet URL has been loaded (off = home screen)
 let oauth2Client    = null;
 let currentUserInfo = null;
+let currentSheetUrl = '';      // last URL loaded in the sheet view
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function sheetViewBounds() {
   const [w, h] = mainWindow.getContentSize();
-  if (launcherIsOpen) {
-    // Push the sheet view entirely below the visible window so the Svelte
-    // Launcher overlay (which lives in the BrowserWindow content layer)
-    // can receive mouse/keyboard events unobstructed.
+  // Move the native WebContentsView completely off-screen whenever any Svelte
+  // overlay needs to be visible and clickable (home screen, launcher, palette).
+  if (!sheetActive || launcherIsOpen || paletteIsOpen) {
     return { x: 0, y: h + TOOLBAR_HEIGHT, width: w, height: h - TOOLBAR_HEIGHT };
   }
   return {
@@ -135,16 +142,34 @@ ipcMain.on('panel:toggle', (_e, isOpen) => {
   if (sheetView) sheetView.setBounds(sheetViewBounds());
 });
 
-// Renderer asks main to load a different sheet URL.
+// Renderer asks main to load a sheet URL — bring the view on-screen.
 ipcMain.on('sheet:open', (_e, url) => {
-  if (sheetView) sheetView.webContents.loadURL(url);
+  currentSheetUrl = url;
+  sheetActive     = true;
+  if (sheetView) {
+    sheetView.webContents.loadURL(url);
+    sheetView.setBounds(sheetViewBounds());
+  }
+});
+
+// Renderer navigated back to home — push the sheet view off-screen so the
+// Home.svelte component (in the BrowserWindow layer) is visible and clickable.
+ipcMain.on('home:show', () => {
+  sheetActive = false;
+  if (sheetView) sheetView.setBounds(sheetViewBounds());
 });
 
 // Renderer tells main the Drive launcher opened or closed.
-// We move the sheet view off-screen while the launcher is visible so the
-// Svelte overlay (which lives below the native WebContentsView) can be clicked.
 ipcMain.on('launcher:toggle', (_e, isOpen) => {
   launcherIsOpen = Boolean(isOpen);
+  if (sheetView) sheetView.setBounds(sheetViewBounds());
+});
+
+// Renderer tells main the command palette dropdown opened or closed.
+// The palette is a Svelte element in the BrowserWindow layer; the native
+// WebContentsView must be moved off-screen so the dropdown is clickable.
+ipcMain.on('palette:toggle', (_e, isOpen) => {
+  paletteIsOpen = Boolean(isOpen);
   if (sheetView) sheetView.setBounds(sheetViewBounds());
 });
 
@@ -198,7 +223,7 @@ ipcMain.handle('auth:logout', async () => {
 ipcMain.handle('drive:listFolder', async (_e, folderId) => {
     if (!oauth2Client) throw new Error('Not authenticated');
     const files = await listFolder(oauth2Client, folderId);
-    console.log('listFolder result:', files.map(f => ({ name: f.name, mimeType: f.mimeType })));     
+    // console.log('listFolder result:', files.map(f => ({ name: f.name, mimeType: f.mimeType })));     
     return files;
   });
 
@@ -210,6 +235,111 @@ ipcMain.handle('drive:listSharedWithMe', async () => {
 ipcMain.handle('drive:listSharedDrives', async () => {
   if (!oauth2Client) throw new Error('Not authenticated');
   return listSharedDrives(oauth2Client);
+});
+
+ipcMain.handle('drive:searchSheets', async (_e, query) => {
+  if (!oauth2Client) throw new Error('Not authenticated');
+  return searchSheets(oauth2Client, query);
+});
+
+// ── Template handlers ─────────────────────────────────────────────────────────
+
+ipcMain.handle('templates:get', async () => {
+  return getTemplates();
+});
+
+ipcMain.handle('templates:add', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Template (.xlsx)',
+    filters: [{ name: 'Excel Files', extensions: ['xlsx'] }],
+    properties: ['openFile'],
+  });
+  if (canceled || filePaths.length === 0) return null;
+  const filePath = filePaths[0];
+  const name     = path.basename(filePath, '.xlsx');
+  const newTmpl  = { id: randomUUID(), name, filePath };
+  const existing = await getTemplates();
+  await saveTemplates([...existing, newTmpl]);
+  return newTmpl;
+});
+
+ipcMain.handle('templates:remove', async (_e, id) => {
+  const existing = await getTemplates();
+  await saveTemplates(existing.filter(t => t.id !== id));
+});
+
+// ── Tubs (local .docx block files) handlers ───────────────────────────────────
+
+ipcMain.handle('tubs:get', async () => {
+  return getTubs();
+});
+
+ipcMain.handle('tubs:add', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Block Files (.docx)',
+    filters: [{ name: 'Word Documents', extensions: ['docx'] }],
+    properties: ['openFile', 'multiSelections'],
+  });
+  if (canceled || filePaths.length === 0) return [];
+  const existing = await getTubs();
+  const added    = filePaths.map(fp => ({
+    id:       randomUUID(),
+    name:     path.basename(fp, '.docx'),
+    filePath: fp,
+  }));
+  await saveTubs([...existing, ...added]);
+  return added;
+});
+
+ipcMain.handle('tubs:remove', async (_e, id) => {
+  const existing = await getTubs();
+  await saveTubs(existing.filter(t => t.id !== id));
+});
+
+// ── Format-link handlers ──────────────────────────────────────────────────────
+
+ipcMain.handle('formatLinks:get', async () => {
+  return getFormatLinks();
+});
+
+ipcMain.handle('formatLinks:set', async (_e, { format, templateId }) => {
+  const links   = await getFormatLinks();
+  const updated = { ...links, [format]: templateId ?? null };
+  await saveFormatLinks(updated);
+  return updated;
+});
+
+// ── Drive / Sheet creation handlers ──────────────────────────────────────────
+
+ipcMain.handle('drive:createSheet', async (_e, params) => {
+  if (!oauth2Client) throw new Error('Not authenticated');
+  return createFlowSheet(oauth2Client, params);
+});
+
+ipcMain.handle('drive:createFromTemplate', async (_e, params) => {
+  if (!oauth2Client) throw new Error('Not authenticated');
+  return createFlowFromTemplate(oauth2Client, params);
+});
+
+// ── Sheet tab handler ─────────────────────────────────────────────────────────
+
+ipcMain.handle('sheet:addTab', async (_e, { spreadsheetId, tabName, format }) => {
+  if (!oauth2Client) throw new Error('Not authenticated');
+
+  // If the current format has a user-linked template, copy the first (blank
+  // template) sheet so the new tab inherits the template's formatting instead
+  // of getting a bare sheet with just column headers.
+  const formatLinks     = await getFormatLinks();
+  const copyFirstSheet  = !!(formatLinks && formatLinks[format]);
+
+  const result = await addFlowTab(oauth2Client, { spreadsheetId, tabName, format, copyFirstSheet });
+
+  // Navigate the embedded sheet to the new tab
+  if (sheetView && currentSheetUrl) {
+    const base = currentSheetUrl.split('#')[0];
+    sheetView.webContents.loadURL(`${base}#gid=${result.sheetId}`);
+  }
+  return result;
 });
 
 

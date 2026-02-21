@@ -10,7 +10,8 @@ const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/oauth2callback`;
 
 const SCOPES = [
   'https://www.googleapis.com/auth/spreadsheets',
-  'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/drive.readonly',  // view files in user's Drive
+  'https://www.googleapis.com/auth/drive.file',  // create/edit files the app opens
   'email',
   'profile',
 ];

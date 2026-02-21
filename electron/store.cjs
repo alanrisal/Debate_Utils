@@ -37,4 +37,40 @@ async function clearAll() {
   s.clear();
 }
 
-module.exports = { getTokens, setTokens, getUserInfo, setUserInfo, clearAll };
+// ── User templates ────────────────────────────────────────────────────────────
+// Each entry: { id, name, filePath }
+async function getTemplates() {
+  const s = await getStore();
+  return s.get('userTemplates', []);
+}
+
+async function saveTemplates(templates) {
+  const s = await getStore();
+  s.set('userTemplates', templates);
+}
+
+// ── Tubs (local .docx block files) ───────────────────────────────────────────
+// Each entry: { id, name, filePath }
+async function getTubs() {
+  const s = await getStore();
+  return s.get('tubs', []);
+}
+
+async function saveTubs(tubs) {
+  const s = await getStore();
+  s.set('tubs', tubs);
+}
+
+// ── Format links (custom template override per built-in format) ───────────────
+// Shape: { Policy: templateId|null, LD: templateId|null, PF: templateId|null }
+async function getFormatLinks() {
+  const s = await getStore();
+  return s.get('formatLinks', { Policy: null, LD: null, PF: null });
+}
+
+async function saveFormatLinks(links) {
+  const s = await getStore();
+  s.set('formatLinks', links);
+}
+
+module.exports = { getTokens, setTokens, getUserInfo, setUserInfo, clearAll, getTemplates, saveTemplates, getTubs, saveTubs, getFormatLinks, saveFormatLinks };
