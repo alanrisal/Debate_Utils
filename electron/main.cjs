@@ -26,7 +26,7 @@ const { parseTub } = require('./parser.cjs');
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const PANEL_WIDTH    = 300;  // px — matches BlockPanel.svelte width
-const TOOLBAR_HEIGHT = 48;   // px — matches Toolbar.svelte height
+const TOOLBAR_HEIGHT = 46;   // px — matches Toolbar.svelte height
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -474,6 +474,17 @@ app.whenReady().then(async () => {
   // Ctrl+. / Cmd+. — open the panel (if closed) and focus the search input.
   // Lets the user click a cell in the sheet, hit Ctrl+., type a query, and
   // inject a block — without ever reaching for the mouse.
+  //
+  // Ctrl+. / Cmd+. — open the panel (if closed) and focus the search input.
+  //
+  // Focus sequencing matters: the WebContentsView (Google Sheets) owns OS focus
+  // after injection. We must:
+  //   1. mainWindow.focus()          — grab the OS-level BrowserWindow focus
+  //   2. mainWindow.webContents.focus() — route keyboard to the Svelte renderer
+  //   3. defer the IPC send ~50 ms   — give the OS time to process the focus
+  //      transfer before element.focus() is called in the renderer.
+  //      Without the delay, the renderer receives panel:focus-search while the
+  //      WebContentsView still owns the keyboard, so element.focus() silently fails.
   globalShortcut.register('CommandOrControl+.', () => {
     if (!mainWindow) return;
     if (!panelOpen) {
@@ -481,7 +492,9 @@ app.whenReady().then(async () => {
       if (sheetView) sheetView.setBounds(sheetViewBounds());
       mainWindow.webContents.send('panel:toggle', panelOpen);
     }
-    mainWindow.webContents.send('panel:focus-search');
+    mainWindow.focus();
+    mainWindow.webContents.focus();
+    setTimeout(() => mainWindow.webContents.send('panel:focus-search'), 50);
   });
 
   app.on('activate', () => {

@@ -197,7 +197,7 @@
 
   .home {
     position: fixed;
-    top: 38px;
+    top: 46px;
     left: 0;
     right: 0;
     bottom: 0;
@@ -232,13 +232,13 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 14px 22px 12px;
+    padding: 18px 26px 14px;
     border-bottom: 1px solid #111;
     flex-shrink: 0;
   }
 
   .bin-title {
-    font-size: 0.62rem;
+    font-size: 0.74rem;
     font-weight: 700;
     letter-spacing: 0.14em;
     text-transform: uppercase;
@@ -250,9 +250,9 @@
     border: 1px solid #1c1c1c;
     border-radius: 3px;
     color: var(--text-white-dim);
-    font-size: 0.65rem;
+    font-size: 0.75rem;
     font-family: var(--font-mono);
-    padding: 3px 10px;
+    padding: 4px 12px;
     cursor: pointer;
     transition: border-color 0.12s, color 0.12s;
   }
@@ -265,17 +265,17 @@
   .bin-body {
     flex: 1;
     overflow-y: auto;
-    padding: 18px 22px;
+    padding: 22px 26px;
     scrollbar-width: thin;
     scrollbar-color: #1a1a1a transparent;
   }
 
   .section-label {
-    font-size: 0.58rem;
+    font-size: 0.68rem;
     letter-spacing: 0.12em;
     text-transform: uppercase;
     color: var(--text-white-dim);
-    margin-bottom: 12px;
+    margin-bottom: 14px;
   }
 
   .tcard-list {
@@ -315,7 +315,7 @@
   }
 
   .tcard-name {
-    font-size: 0.78rem;
+    font-size: 0.9rem;
     font-weight: 700;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -323,7 +323,7 @@
   }
 
   .tcard-action {
-    font-size: 0.62rem;
+    font-size: 0.74rem;
     color: var(--text-white-dim);
     transition: color 0.14s;
   }
@@ -348,13 +348,13 @@
   }
 
   .col-chip {
-    font-size: 0.6rem;
+    font-size: 0.72rem;
     letter-spacing: 0.04em;
     color: var(--text-white-dim);
     background: #0a0a0a;
     border: 1px solid #181818;
     border-radius: 2px;
-    padding: 2px 7px;
+    padding: 3px 8px;
   }
 
   .file-row {
@@ -392,7 +392,7 @@
   }
 
   .file-name {
-    font-size: 0.75rem;
+    font-size: 0.86rem;
     color: var(--text-white);
     white-space: nowrap;
     overflow: hidden;
@@ -400,7 +400,7 @@
   }
 
   .file-path {
-    font-size: 0.6rem;
+    font-size: 0.7rem;
     color: var(--text-white-faint);
     white-space: nowrap;
     overflow: hidden;
@@ -432,12 +432,12 @@
   }
 
   .empty-main {
-    font-size: 0.72rem;
+    font-size: 0.84rem;
     color: var(--text-white);
   }
 
   .empty-sub {
-    font-size: 0.62rem;
+    font-size: 0.72rem;
     color: var(--text-white-faint);
     line-height: 1.5;
   }
@@ -593,13 +593,13 @@
 }
 
 .link-icon {
-  font-size: 0.62rem;
+  font-size: 0.74rem;
   color: #5a5a9a;
 }
 
 .link-name {
   flex: 1;
-  font-size: 0.62rem;
+  font-size: 0.74rem;
   color: #7a7aaa;
   white-space: nowrap;
   overflow: hidden;
@@ -610,7 +610,7 @@
   background: none;
   border: none;
   color: #333;
-  font-size: 0.75rem;
+  font-size: 0.86rem;
   cursor: pointer;
   padding: 0 2px;
   font-family: var(--font-mono);
@@ -625,9 +625,9 @@
   border: 1px solid #1a1a1a;
   border-radius: 3px;
   color: #3a3a5a;
-  font-size: 0.62rem;
+  font-size: 0.74rem;
   font-family: var(--font-mono);
-  padding: 3px 6px;
+  padding: 4px 8px;
   outline: none;
   cursor: pointer;
   transition: border-color 0.12s, color 0.12s;

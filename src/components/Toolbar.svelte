@@ -305,13 +305,13 @@
   .orchestrator {
     position: fixed;
     top: 0; left: 0; right: 0;
-    height: 38px;
+    height: 46px;
     background: var(--bg);
     border-bottom: 1px solid var(--border);
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 12px;
+    padding: 0 16px;
     font-family: var(--font-mono);
     -webkit-app-region: drag;
     z-index: 1000;
@@ -325,8 +325,8 @@
     min-width: 220px;
   }
 
-  .system-status { width: 8px; height: 8px; border: 1px solid var(--text-dim); }
-  .app-name { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text-main); }
+  .system-status { width: 9px; height: 9px; border: 1px solid var(--text-dim); }
+  .app-name { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text-main); }
   .version { color: var(--text-dim); font-weight: 400; margin-left: 4px; }
 
   .home-btn {
@@ -338,15 +338,15 @@
     border-radius: 3px;
     color: #8888cc;
     font-family: var(--font-mono);
-    font-size: 10px;
-    padding: 3px 9px 3px 7px;
+    font-size: 12px;
+    padding: 4px 10px 4px 8px;
     cursor: pointer;
     letter-spacing: 0.04em;
     transition: background 0.12s, border-color 0.12s, color 0.12s;
     -webkit-app-region: no-drag;
   }
   .home-btn:hover { background: #141426; border-color: #5555aa; color: #aaaaee; }
-  .home-arrow { font-size: 11px; line-height: 1; }
+  .home-arrow { font-size: 13px; line-height: 1; }
   .home-label { text-transform: lowercase; letter-spacing: 0.06em; }
 
   .sheet-controls {
@@ -363,9 +363,9 @@
     border-radius: 2px;
     color: #555577;
     font-family: var(--font-mono);
-    font-size: 9px;
+    font-size: 11px;
     letter-spacing: 0.06em;
-    padding: 2px 6px;
+    padding: 3px 8px;
     cursor: pointer;
     text-transform: lowercase;
     transition: border-color 0.12s, color 0.12s;
@@ -378,16 +378,16 @@
     border-radius: 2px;
     color: #b9b9bf;
     font-family: var(--font-mono);
-    font-size: 12px;
-    padding: 2px 7px;
+    font-size: 13px;
+    padding: 3px 8px;
     cursor: pointer;
     letter-spacing: 0.05em;
     transition: border-color 0.12s, color 0.12s, background 0.12s;
   }
-  .tab-btn:hover:not(:disabled) { 
-    border-color: #5555aa; 
-    color: #aaaaee; 
-    background: #0f0f1a; 
+  .tab-btn:hover:not(:disabled) {
+    border-color: #5555aa;
+    color: #aaaaee;
+    background: #0f0f1a;
     transform: scale(1.12) translateY(-2px);
   }
   .tab-btn:disabled { opacity: 0.4; cursor: default; }
@@ -395,24 +395,24 @@
   /* ── Center ───────────────────────────────────────────────────────────── */
   .commander {
     position: relative;
-    width: 400px;
+    width: 440px;
     flex-shrink: 0;
     transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     -webkit-app-region: no-drag;
   }
-  .commander.active { width: 480px; }
+  .commander.active { width: 520px; }
 
   .input-wrapper {
     background: var(--surface);
     border: 1px solid var(--border);
-    height: 26px;
+    height: 30px;
     display: flex;
     align-items: center;
-    padding: 0 10px;
+    padding: 0 12px;
     gap: 8px;
   }
 
-  .prompt { color: var(--text-dim); font-size: 12px; }
+  .prompt { color: var(--text-dim); font-size: 14px; }
 
   input {
     flex: 1;
@@ -420,17 +420,17 @@
     border: none;
     color: var(--text-main);
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 13px;
     outline: none;
   }
   input::placeholder { color: var(--text-dim); text-transform: lowercase; }
 
-  .error-tag { color: #ff4545; font-size: 10px; text-transform: uppercase; }
+  .error-tag { color: #ff4545; font-size: 12px; text-transform: uppercase; }
 
   /* ── Palette dropdown ─────────────────────────────────────────────────── */
   .palette {
     position: absolute;
-    top: 32px; left: 0; right: 0;
+    top: 36px; left: 0; right: 0;
     background: var(--bg);
     border: 1px solid var(--border);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
@@ -443,7 +443,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 6px 10px;
+    padding: 8px 12px;
     background: none;
     border: none;
     font-family: var(--font-mono);
@@ -455,17 +455,17 @@
   .palette-item.selected .cmd-label,
   .palette-item.selected .cmd-shortcut { color: #000; }
 
-  .cmd-label   { color: var(--text-main); font-size: 11px; text-transform: lowercase; }
-  .cmd-shortcut { color: var(--text-dim);  font-size: 10px; }
+  .cmd-label    { color: var(--text-main); font-size: 13px; text-transform: lowercase; }
+  .cmd-shortcut { color: var(--text-dim);  font-size: 12px; }
 
   .palette-msg {
-    padding: 8px 10px;
-    font-size: 10px;
+    padding: 10px 12px;
+    font-size: 12px;
     color: var(--text-dim);
     text-transform: lowercase;
   }
 
-  .file-icon { color: #1a73e8; margin-right: 6px; font-size: 12px; }
+  .file-icon { color: #1a73e8; margin-right: 6px; font-size: 13px; }
 
   /* ── Right ────────────────────────────────────────────────────────────── */
   .identity {
@@ -486,9 +486,9 @@
     border-radius: 2px;
     color: #555577;
     font-family: var(--font-mono);
-    font-size: 9px;
+    font-size: 11px;
     letter-spacing: 0.06em;
-    padding: 3px 8px;
+    padding: 4px 10px;
     cursor: pointer;
     transition: border-color 0.12s, color 0.12s, background 0.12s;
   }
@@ -500,8 +500,8 @@
   }
 
   .panel-icon {
-    width: 8px;
-    height: 8px;
+    width: 10px;
+    height: 10px;
     border: 1px solid currentColor;
     border-radius: 1px;
     position: relative;
@@ -523,16 +523,16 @@
     display: flex; align-items: center; gap: 8px;
     cursor: pointer; padding: 4px;
   }
-  .user-id { color: var(--text-main); font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
+  .user-id { color: var(--text-main); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; }
   .status-online { width: 4px; height: 4px; background: var(--accent); }
 
   .auth-trigger {
     background: transparent;
     border: 1px solid var(--text-dim);
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: 12px;
     font-family: var(--font-mono);
-    padding: 2px 8px;
+    padding: 3px 10px;
     cursor: pointer;
   }
   .auth-trigger:hover { border-color: var(--accent); color: var(--accent); }
