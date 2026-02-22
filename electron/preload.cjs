@@ -43,6 +43,9 @@ contextBridge.exposeInMainWorld('flowkit', {
   // Returns: [{ id, name, mimeType, modifiedTime, webViewLink }]
   searchSheets: (query) => ipcRenderer.invoke('drive:searchSheets', query),
 
+  // Request a panel open/close toggle from the renderer (e.g. toolbar button).
+  togglePanel: () => ipcRenderer.send('panel:toggle-request'),
+
   // Tell main whether the Drive launcher is open so it can move the sheet view
   toggleLauncher: (isOpen) => ipcRenderer.send('launcher:toggle', isOpen),
 
@@ -81,6 +84,29 @@ contextBridge.exposeInMainWorld('flowkit', {
   getTubs:    ()     => ipcRenderer.invoke('tubs:get'),
   addTub:     ()     => ipcRenderer.invoke('tubs:add'),            // opens file picker
   removeTub:  (id)   => ipcRenderer.invoke('tubs:remove', id),
+
+  // Apply WRAP to all tabs of the given spreadsheet (on-demand).
+  fixSheetWrapping: (spreadsheetId) => ipcRenderer.invoke('sheet:fixWrapping', spreadsheetId),
+
+  // Parse + cache all registered tubs (fire-and-forget at startup).
+  // Returns [{ tubId, name, count, error? }]
+  parseAllTubs: () => ipcRenderer.invoke('tubs:parseAll'),
+
+  // Load the pre-parsed block array for a specific tub.
+  // Returns the flat block JSON array for the given tub ID.
+  loadTubBlocks: (tubId) => ipcRenderer.invoke('tubs:getBlocks', tubId),
+
+  // Write block content to clipboard and simulate Ctrl+V into the sheet.
+  // Newlines are sanitized to U+2028 so content lands in a single cell.
+  injectBlock: (content) => ipcRenderer.invoke('blocks:inject', content),
+
+  // Main → Renderer: Ctrl+. pressed — focus the block panel search input.
+  // Returns an unsubscribe function.
+  onPanelFocusSearch: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on('panel:focus-search', handler);
+    return () => ipcRenderer.off('panel:focus-search', handler);
+  },
 
   // Main → Renderer: auth completed (e.g. triggered externally).
   // Returns an unsubscribe function.

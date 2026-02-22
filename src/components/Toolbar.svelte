@@ -2,7 +2,7 @@
   import { fly, fade } from 'svelte/transition';
   import { currentSheetUrl } from '../stores/sheetState.js';
   import { authState } from '../stores/auth.js';
-  import { launcherOpen, launcherMode, sheetFormat } from '../stores/uiState.js';
+  import { launcherOpen, launcherMode, sheetFormat, panelOpen } from '../stores/uiState.js';
 
   let inputValue    = '';
   let error         = '';
@@ -63,6 +63,7 @@
     ...($currentSheetUrl ? [{ id: 'home', label: 'go to home', shortcut: 'B', action: goHome }] : []),
     { id: 'open', label: 'open drive library', shortcut: 'O', action: () => { launcherMode.set('open');     launcherOpen.set(true); } },
     { id: 'new',  label: 'create new flow',    shortcut: 'N', action: () => { launcherMode.set('new-flow'); launcherOpen.set(true); } },
+    ...($currentSheetUrl ? [{ id: 'wrap', label: fixingWrap ? 'fixing wrap…' : 'fix row wrapping', shortcut: 'W', action: runFixWrap }] : []),
     { id: 'exit', label: 'terminate session',  shortcut: '⎋', action: () => window.flowkit?.closeWindow() },
     { id: 'select', label: 'find specific sheet', shortcut: '/', action: () => { inputValue = '/'; isFocused = true; setTimeout(() => document.getElementById('topbar-input')?.focus(), 0); } },
   ];
@@ -117,6 +118,7 @@
         case 'o': e.preventDefault(); commands.find(c => c.id === 'open')?.action(); isFocused = false; break;
         case 'n': e.preventDefault(); commands.find(c => c.id === 'new')?.action();  isFocused = false; break;
         case 'b': e.preventDefault(); commands.find(c => c.id === 'home')?.action(); isFocused = false; break;
+        case 'w': e.preventDefault(); commands.find(c => c.id === 'wrap')?.action(); isFocused = false; break;
       }
     }
   }
@@ -132,6 +134,21 @@
     } else {
       error = 'invalid source';
       setTimeout(() => (error = ''), 2000);
+    }
+  }
+
+  // ── Wrap fix ──────────────────────────────────────────────────────────────
+  let fixingWrap = false;
+
+  async function runFixWrap() {
+    const match = $currentSheetUrl?.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    const id    = match?.[1];
+    if (!id || !window.flowkit?.fixSheetWrapping) return;
+    fixingWrap = true;
+    try {
+      await window.flowkit.fixSheetWrapping(id);
+    } finally {
+      fixingWrap = false;
     }
   }
 
@@ -174,8 +191,13 @@
         <button class="fmt-btn" on:click={cycleFormat} title="Click to cycle format">
           {$sheetFormat.toLowerCase()}
         </button>
-        <button class="tab-btn" on:click={() => addTab('Aff')} disabled={addingTab}>+aff</button>
-        <button class="tab-btn" on:click={() => addTab('Neg')} disabled={addingTab}>+neg</button>
+        <button class="tab-btn" on:click={() => addTab('Adv')} disabled={addingTab}>+aff</button>
+        <button class="tab-btn" on:click={() => addTab('OFF')} disabled={addingTab}>+neg</button>
+        <button class="tab-btn" on:click={() => addTab('DA')} disabled={addingTab}>+DA</button>
+        <button class="tab-btn" on:click={() => addTab('T')} disabled={addingTab}>+T</button>
+        <button class="tab-btn" on:click={() => addTab('CP')} disabled={addingTab}>+CP</button>
+        <button class="tab-btn" on:click={() => addTab('K')} disabled={addingTab}>+K</button>
+
       </div>
     {:else}
       <span class="system-status"></span>
@@ -244,6 +266,16 @@
 
   <!-- ── Right: identity ───────────────────────────────────────────────── -->
   <div class="identity">
+    <button
+      class="panel-toggle"
+      class:panel-active={$panelOpen}
+      on:click={() => window.flowkit?.togglePanel()}
+      title="Toggle block panel (Ctrl+K)"
+    >
+      <span class="panel-icon"></span>
+      <span class="panel-label">blocks</span>
+    </button>
+
     {#if $authState.loggedIn}
       <button class="user-pill" on:click={() => launcherOpen.set(true)}>
         <span class="user-id">{$authState.userInfo?.email.split('@')[0]}</span>
@@ -344,14 +376,20 @@
     background: none;
     border: 1px solid #252535;
     border-radius: 2px;
-    color: #666688;
+    color: #b9b9bf;
     font-family: var(--font-mono);
-    font-size: 9px;
+    font-size: 12px;
     padding: 2px 7px;
     cursor: pointer;
+    letter-spacing: 0.05em;
     transition: border-color 0.12s, color 0.12s, background 0.12s;
   }
-  .tab-btn:hover:not(:disabled) { border-color: #5555aa; color: #aaaaee; background: #0f0f1a; }
+  .tab-btn:hover:not(:disabled) { 
+    border-color: #5555aa; 
+    color: #aaaaee; 
+    background: #0f0f1a; 
+    transform: scale(1.12) translateY(-2px);
+  }
   .tab-btn:disabled { opacity: 0.4; cursor: default; }
 
   /* ── Center ───────────────────────────────────────────────────────────── */
@@ -433,11 +471,52 @@
   .identity {
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 12px;
     min-width: 220px;
     justify-content: flex-end;
     -webkit-app-region: no-drag;
   }
+
+  .panel-toggle {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    background: none;
+    border: 1px solid #252535;
+    border-radius: 2px;
+    color: #555577;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    padding: 3px 8px;
+    cursor: pointer;
+    transition: border-color 0.12s, color 0.12s, background 0.12s;
+  }
+  .panel-toggle:hover { border-color: #4444aa; color: #9999dd; }
+  .panel-toggle.panel-active {
+    border-color: #5555cc;
+    color: #aaaaff;
+    background: #0d0d1a;
+  }
+
+  .panel-icon {
+    width: 8px;
+    height: 8px;
+    border: 1px solid currentColor;
+    border-radius: 1px;
+    position: relative;
+    flex-shrink: 0;
+  }
+  /* Right-side stripe to suggest the panel position */
+  .panel-icon::after {
+    content: '';
+    position: absolute;
+    top: 0; right: 0; bottom: 0;
+    width: 3px;
+    background: currentColor;
+    border-radius: 0 1px 1px 0;
+  }
+  .panel-label { text-transform: lowercase; }
 
   .user-pill {
     background: none; border: none;

@@ -1,19 +1,30 @@
 <script>
-  import { onMount } from 'svelte';
-  import Toolbar  from './components/Toolbar.svelte';
-  import Launcher from './components/Launcher.svelte';
-  import Home     from './components/Home.svelte';
-  import { launcherOpen } from './stores/uiState.js';
-  import { currentSheetUrl } from './stores/sheetState.js';
+  import { onMount, tick } from 'svelte';
+  import Toolbar     from './components/Toolbar.svelte';
+  import Launcher    from './components/Launcher.svelte';
+  import Home        from './components/Home.svelte';
+  import BlockPanel  from './components/BlockPanel.svelte';
+  import { launcherOpen, panelOpen } from './stores/uiState.js';
 
-  let panelOpen = false;
+  let blockPanel = null;   // bound to BlockPanel instance for focusSearch()
+  import { currentSheetUrl } from './stores/sheetState.js';
 
   onMount(() => {
     if (!window.flowkit) return;
 
-    // Main process sends this when Ctrl+K is pressed.
+    // Warm up the tub cache in the background so the panel loads instantly.
+    window.flowkit.parseAllTubs?.();
+
+    // Main process sends this when Ctrl+K is pressed or the toolbar button fires.
     const unsubPanel = window.flowkit.onPanelToggle((isOpen) => {
-      panelOpen = isOpen;
+      panelOpen.set(isOpen);
+    });
+
+    // Ctrl+. — open panel if needed then immediately focus the search input.
+    const unsubFocus = window.flowkit.onPanelFocusSearch(async () => {
+      if (!$panelOpen) panelOpen.set(true);
+      await tick();   // wait for BlockPanel to mount if it just became visible
+      blockPanel?.focusSearch();
     });
 
     // Keep the native sheet view in sync with the launcher open/closed state.
@@ -25,6 +36,7 @@
 
     return () => {
       unsubPanel();
+      unsubFocus();
       unsubLauncher();
     };
   });
@@ -38,13 +50,9 @@
        This div fills that same space so clicks pass through to the sheet. -->
   <div class="sheet-area" aria-hidden="true" />
 
-  {#if panelOpen}
+  {#if $panelOpen}
     <aside class="panel">
-      <!-- BlockPanel.svelte will live here in the next phase -->
-      <div class="panel-placeholder">
-        <span>block panel</span>
-        <span class="sub">coming soon — ctrl+k to toggle</span>
-      </div>
+      <BlockPanel bind:this={blockPanel} />
     </aside>
   {/if}
 
@@ -90,19 +98,4 @@
     overflow: hidden;
   }
 
-  .panel-placeholder {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    gap: 6px;
-    color: var(--muted);
-    font-size: 0.8rem;
-  }
-
-  .sub {
-    font-size: 0.68rem;
-    color: #2a2a2a;
-  }
 </style>

@@ -92,7 +92,7 @@ async function createFlowSheet(auth, { name, folderId, format }) {
     requestBody: { values: [headers] },
   });
 
-  // 5. Format header row: bold + frozen + column widths
+  // 5. Format: bold header + freeze + column widths + WRAP on all data rows
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
     requestBody: {
@@ -118,6 +118,22 @@ async function createFlowSheet(auth, { name, folderId, format }) {
             range: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: headers.length },
             properties: { pixelSize: 160 },
             fields: 'pixelSize',
+          },
+        },
+        // Enable text wrapping on all data rows (row 2 onward).
+        {
+          repeatCell: {
+            range: { sheetId, startRowIndex: 1 },
+            cell: { userEnteredFormat: { wrapStrategy: 'WRAP' } },
+            fields: 'userEnteredFormat.wrapStrategy',
+          },
+        },
+        // Auto-resize data rows to "fit to data" so row height expands as
+        // content grows. Without this, rows stay at a fixed default height
+        // even when WRAP is set and content overflows.
+        {
+          autoResizeDimensions: {
+            dimensions: { sheetId, dimension: 'ROWS', startIndex: 1, endIndex: 1000 },
           },
         },
       ],
@@ -287,6 +303,20 @@ async function addFlowTab(auth, { spreadsheetId, tabName, format, copyFirstSheet
               fields: 'pixelSize',
             },
           },
+          // WRAP on all data rows so text wraps within cells.
+          {
+            repeatCell: {
+              range: { sheetId: newSheetId, startRowIndex: 1 },
+              cell: { userEnteredFormat: { wrapStrategy: 'WRAP' } },
+              fields: 'userEnteredFormat.wrapStrategy',
+            },
+          },
+          // Auto-resize data rows to "fit to data" so row height expands with content.
+          {
+            autoResizeDimensions: {
+              dimensions: { sheetId: newSheetId, dimension: 'ROWS', startIndex: 1, endIndex: 1000 },
+            },
+          },
         ],
       },
     });
@@ -338,4 +368,50 @@ async function searchSheets(auth, query) {
   return results.slice(0, 20);
 }
 
-module.exports = { listFolder, listSharedWithMe, listSharedDrives, createFlowSheet, createFlowFromTemplate, addFlowTab, searchSheets };
+// Apply WRAP + row auto-resize to every tab of a spreadsheet.
+// WRAP alone doesn't help if rows have a fixed pixel height. We must also run
+// autoResizeDimensions on rows 1–1000 to clear any fixed height and set rows
+// to "fit to data" so they expand as content grows.
+// Fire-and-forget — callers do not need to await this.
+async function fixSheetWrapping(auth, spreadsheetId) {
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: 'sheets(properties(sheetId))',
+  });
+  const sheetIds = (meta.data.sheets || []).map(s => s.properties.sheetId);
+  if (!sheetIds.length) return;
+
+  // Two requests per tab, all bundled in a single batchUpdate round-trip:
+  //   1. WRAP — text wraps within the cell instead of clipping.
+  //   2. autoResizeDimensions — clears any fixed pixel row heights and sets
+  //      rows 1–1000 (data rows) to "fit to data", so row height expands
+  //      dynamically as content grows.
+  const requests = sheetIds.flatMap(sheetId => [
+    {
+      repeatCell: {
+        range: { sheetId, startRowIndex: 1 }, // row 2 onward; row 1 = header
+        cell:  { userEnteredFormat: { wrapStrategy: 'WRAP' } },
+        fields: 'userEnteredFormat.wrapStrategy',
+      },
+    },
+    {
+      autoResizeDimensions: {
+        dimensions: {
+          sheetId,
+          dimension:  'ROWS',
+          startIndex: 1,    // row 2 onward (0-indexed), skip frozen header
+          endIndex:   1000,
+        },
+      },
+    },
+  ]);
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: { requests },
+  });
+}
+
+module.exports = { listFolder, listSharedWithMe, listSharedDrives, createFlowSheet, createFlowFromTemplate, addFlowTab, searchSheets, fixSheetWrapping };

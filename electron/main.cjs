@@ -1,12 +1,12 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, globalShortcut, WebContentsView, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, WebContentsView, dialog, clipboard } = require('electron');
 const path = require('path');
+const fs   = require('fs');
 const { randomUUID } = require('crypto');
 
 // Load .env before anything that reads process.env
 try {
-  const fs = require('fs');
   const lines = fs.readFileSync(path.join(__dirname, '../.env'), 'utf8').split(/\r?\n/);
   for (const line of lines) {
     const m = line.match(/^\s*([^#=\s][^=]*?)\s*=\s*(.*?)\s*$/);
@@ -20,7 +20,8 @@ const { getTokens, setTokens, getUserInfo, setUserInfo, clearAll,
 const { startAuthFlow, buildClientFromTokens } = require('./auth.cjs');
 const { listFolder, listSharedWithMe, listSharedDrives,
         createFlowSheet, createFlowFromTemplate, addFlowTab,
-        searchSheets } = require('./sheets-api.cjs');
+        searchSheets, fixSheetWrapping } = require('./sheets-api.cjs');
+const { parseTub } = require('./parser.cjs');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -38,6 +39,33 @@ let sheetActive     = false;   // a sheet URL has been loaded (off = home screen
 let oauth2Client    = null;
 let currentUserInfo = null;
 let currentSheetUrl = '';      // last URL loaded in the sheet view
+
+// Tracks spreadsheetIds that have had WRAP applied this session so we don't
+// repeat the batchUpdate every time the user navigates back to the same sheet.
+const wrappingFixedIds = new Set();
+
+// ── Tub cache helpers ─────────────────────────────────────────────────────────
+// Parsed .docx tubs are serialized as JSON next to the userData dir so the
+// app never re-parses a file it has already seen. Cache is keyed by tub ID.
+
+function tubCacheDir() {
+  return path.join(app.getPath('userData'), 'tub-cache');
+}
+
+function tubCachePath(tubId) {
+  return path.join(tubCacheDir(), `${tubId}.json`);
+}
+
+async function ensureTubParsed(tub) {
+  const cachePath = tubCachePath(tub.id);
+  if (fs.existsSync(cachePath)) {
+    return JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+  }
+  const blocks = await parseTub(tub.filePath);
+  fs.mkdirSync(tubCacheDir(), { recursive: true });
+  fs.writeFileSync(cachePath, JSON.stringify(blocks));
+  return blocks;
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -142,6 +170,14 @@ ipcMain.on('panel:toggle', (_e, isOpen) => {
   if (sheetView) sheetView.setBounds(sheetViewBounds());
 });
 
+// Renderer requests a panel toggle (e.g. from the toolbar button).
+// Mirrors the Ctrl+K global shortcut logic.
+ipcMain.on('panel:toggle-request', () => {
+  panelOpen = !panelOpen;
+  if (sheetView) sheetView.setBounds(sheetViewBounds());
+  if (mainWindow) mainWindow.webContents.send('panel:toggle', panelOpen);
+});
+
 // Renderer asks main to load a sheet URL — bring the view on-screen.
 ipcMain.on('sheet:open', (_e, url) => {
   currentSheetUrl = url;
@@ -149,6 +185,16 @@ ipcMain.on('sheet:open', (_e, url) => {
   if (sheetView) {
     sheetView.webContents.loadURL(url);
     sheetView.setBounds(sheetViewBounds());
+  }
+
+  // Silently apply WRAP to all tabs once per session per spreadsheet.
+  // Fixes existing sheets created before the WRAP-on-create change.
+  const idMatch = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  const spreadsheetId = idMatch?.[1];
+  if (spreadsheetId && oauth2Client && !wrappingFixedIds.has(spreadsheetId)) {
+    wrappingFixedIds.add(spreadsheetId);
+    fixSheetWrapping(oauth2Client, spreadsheetId)
+      .catch(e => console.error('fixSheetWrapping:', e.message));
   }
 });
 
@@ -288,12 +334,72 @@ ipcMain.handle('tubs:add', async () => {
     filePath: fp,
   }));
   await saveTubs([...existing, ...added]);
+  // Parse and cache each new tub immediately so it's ready when the panel opens.
+  fs.mkdirSync(tubCacheDir(), { recursive: true });
+  for (const tub of added) {
+    try {
+      const blocks = await parseTub(tub.filePath);
+      fs.writeFileSync(tubCachePath(tub.id), JSON.stringify(blocks));
+    } catch (e) {
+      console.error(`tubs:add — failed to parse ${tub.name}:`, e.message);
+    }
+  }
   return added;
 });
 
 ipcMain.handle('tubs:remove', async (_e, id) => {
   const existing = await getTubs();
   await saveTubs(existing.filter(t => t.id !== id));
+  // Clean up the JSON cache file.
+  const cachePath = tubCachePath(id);
+  if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath);
+});
+
+// ── Block parsing / injection handlers ───────────────────────────────────────
+
+// Called at app startup: ensures every registered tub has a JSON cache so
+// loading a tub in the panel is instant (no on-demand parse needed).
+ipcMain.handle('tubs:parseAll', async () => {
+  const tubs = await getTubs();
+  fs.mkdirSync(tubCacheDir(), { recursive: true });
+  const results = [];
+  for (const tub of tubs) {
+    try {
+      const blocks = await ensureTubParsed(tub);
+      results.push({ tubId: tub.id, name: tub.name, count: blocks.length });
+    } catch (e) {
+      results.push({ tubId: tub.id, name: tub.name, count: 0, error: e.message });
+    }
+  }
+  return results;
+});
+
+// Return the cached block array for a single tub (parse on demand if missing).
+ipcMain.handle('tubs:getBlocks', async (_e, tubId) => {
+  const tubs = await getTubs();
+  const tub  = tubs.find(t => t.id === tubId);
+  if (!tub) throw new Error('Tub not found');
+  return ensureTubParsed(tub);
+});
+
+// Write block content to the OS clipboard then simulate Ctrl+V into the sheet.
+//
+// Paste strategy: TSV quoting (RFC 4180).
+// Google Sheets parses plain-text clipboard as tab-separated values. In TSV,
+// wrapping a field in double-quotes lets it contain literal \n characters that
+// become in-cell line breaks instead of new rows. Internal " are escaped as "".
+//
+// U+2028 was tried previously and silently stripped by Sheets — do not use it.
+ipcMain.handle('blocks:inject', async (_e, content) => {
+  // Normalise line endings then apply TSV quoting.
+  const body    = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const escaped = body.replace(/"/g, '""');
+  clipboard.writeText(`"${escaped}"`);
+  if (sheetView) {
+    sheetView.webContents.focus();
+    sheetView.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'V', modifiers: ['control'] });
+    sheetView.webContents.sendInputEvent({ type: 'keyUp',   keyCode: 'V', modifiers: ['control'] });
+  }
 });
 
 // ── Format-link handlers ──────────────────────────────────────────────────────
@@ -319,6 +425,13 @@ ipcMain.handle('drive:createSheet', async (_e, params) => {
 ipcMain.handle('drive:createFromTemplate', async (_e, params) => {
   if (!oauth2Client) throw new Error('Not authenticated');
   return createFlowFromTemplate(oauth2Client, params);
+});
+
+// On-demand WRAP fix — exposed to the renderer for the palette command.
+ipcMain.handle('sheet:fixWrapping', async (_e, spreadsheetId) => {
+  if (!oauth2Client) throw new Error('Not authenticated');
+  await fixSheetWrapping(oauth2Client, spreadsheetId);
+  wrappingFixedIds.add(spreadsheetId); // mark so auto-fix doesn't re-run
 });
 
 // ── Sheet tab handler ─────────────────────────────────────────────────────────
@@ -356,6 +469,19 @@ app.whenReady().then(async () => {
     panelOpen = !panelOpen;
     if (sheetView) sheetView.setBounds(sheetViewBounds());
     mainWindow.webContents.send('panel:toggle', panelOpen);
+  });
+
+  // Ctrl+. / Cmd+. — open the panel (if closed) and focus the search input.
+  // Lets the user click a cell in the sheet, hit Ctrl+., type a query, and
+  // inject a block — without ever reaching for the mouse.
+  globalShortcut.register('CommandOrControl+.', () => {
+    if (!mainWindow) return;
+    if (!panelOpen) {
+      panelOpen = true;
+      if (sheetView) sheetView.setBounds(sheetViewBounds());
+      mainWindow.webContents.send('panel:toggle', panelOpen);
+    }
+    mainWindow.webContents.send('panel:focus-search');
   });
 
   app.on('activate', () => {
