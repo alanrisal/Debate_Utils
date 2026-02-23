@@ -5,14 +5,23 @@ const path = require('path');
 const fs   = require('fs');
 const { randomUUID } = require('crypto');
 
-// Load .env before anything that reads process.env
-try {
-  const lines = fs.readFileSync(path.join(__dirname, '../.env'), 'utf8').split(/\r?\n/);
-  for (const line of lines) {
-    const m = line.match(/^\s*([^#=\s][^=]*?)\s*=\s*(.*?)\s*$/);
-    if (m) process.env[m[1]] = m[2];
-  }
-} catch { /* .env not found — env vars must be set externally */ }
+// Load .env before anything that reads process.env.
+// In a packaged app, .env lives in process.resourcesPath (bundled via extraResources).
+// In development, it lives next to package.json (one level above electron/).
+const ENV_PATHS = [
+  path.join(process.resourcesPath ?? '', '.env'), // packaged
+  path.join(__dirname, '../.env'),                 // development
+];
+for (const envPath of ENV_PATHS) {
+  try {
+    const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+    for (const line of lines) {
+      const m = line.match(/^\s*([^#=\s][^=]*?)\s*=\s*(.*?)\s*$/);
+      if (m) process.env[m[1]] = m[2];
+    }
+    break; // stop at the first .env that loads successfully
+  } catch { /* try next path */ }
+}
 
 const { getTokens, setTokens, getUserInfo, setUserInfo, clearAll,
         getTemplates, saveTemplates, getTubs, saveTubs,

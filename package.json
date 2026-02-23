@@ -1,17 +1,17 @@
 {
   "name": "flowkit",
   "version": "0.1.0",
+  "description": "Debate flow tool with block autofill",
+  "author": "Alan Risal",
   "private": true,
   "main": "electron/main.cjs",
   "type": "module",
-
   "scripts": {
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "build": "vite build",
     "preview": "vite preview",
     "dist": "npm run build && electron-builder"
   },
-
   "dependencies": {
     "dotenv": "^17.3.1",
     "electron-store": "^11.0.2",
@@ -19,7 +19,6 @@
     "googleapis": "^171.4.0",
     "mammoth": "^1.11.0"
   },
-
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.2.1",
     "concurrently": "^9.2.1",
@@ -30,17 +29,19 @@
     "vite": "^7.3.1",
     "wait-on": "^9.0.4"
   },
-
   "build": {
     "appId": "com.flowkit.app",
     "productName": "FlowKit",
     "directories": {
-      "buildResources": "assets"
+      "buildResources": "build"
     },
     "files": [
       "dist/**/*",
       "electron/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      { "from": ".env", "to": ".env" }
     ],
     "mac": {
       "target": "dmg"
