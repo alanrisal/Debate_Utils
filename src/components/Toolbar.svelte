@@ -9,6 +9,10 @@
   let isFocused     = false;
   let selectedIndex = 0;
 
+  // On macOS with titleBarStyle:'hidden' the traffic light buttons sit inside
+  // the toolbar. Reserve left space so they don't collide with toolbar content.
+  const isMac = typeof window !== 'undefined' && window.flowkit?.platform === 'darwin';
+
   // ── Search mode (input starts with '/') ───────────────────────────────────
   let searchResults = [];
   let searching     = false;
@@ -178,7 +182,7 @@
 
 <svelte:window on:keydown={handleGlobalKeydown} />
 
-<header class="orchestrator">
+<header class="orchestrator" class:mac={isMac}>
 
   <!-- ── Left: meta / sheet controls ──────────────────────────────────── -->
   <div class="meta">
@@ -315,6 +319,10 @@
     font-family: var(--font-mono);
     -webkit-app-region: drag;
     z-index: 1000;
+  }
+  /* Push left content past the macOS traffic light buttons (≈68px wide at x:14) */
+  .orchestrator.mac {
+    padding-left: 78px;
   }
 
   /* ── Left ─────────────────────────────────────────────────────────────── */

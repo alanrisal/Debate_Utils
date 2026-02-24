@@ -1,21 +1,7 @@
 <script lang="ts" context="module">
   declare global {
     interface Window {
-      flowkit?: {
-        listSharedDrives: () => Promise<any>;
-        listSharedWithMe: () => Promise<any>;
-        listFolder: (id: string) => Promise<any>;
-        searchSheets: (query: string) => Promise<any>;
-        getAuthStatus: () => Promise<any>;
-        getTemplates: () => Promise<any>;
-        getFormatLinks: () => Promise<any>;
-        createFlowFromTemplate: (opts: any) => Promise<any>;
-        createFlowSheet: (opts: any) => Promise<any>;
-        openSheet: (url: string) => void;
-        startAuth: () => Promise<any>;
-        logout: () => Promise<any>;
-        onAuthComplete: (cb: (data: any) => void) => () => void;
-      };
+      flowkit?: Record<string, any>;
     }
   }
 </script>

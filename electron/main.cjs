@@ -126,6 +126,10 @@ function createWindow() {
     minHeight: 600,
     show: false,
     titleBarStyle: 'hidden',
+    // Position the macOS traffic lights so they sit inside the 46px toolbar
+    // without overlapping toolbar content. x:14 aligns them with the left
+    // padding; y:15 centres the 16px buttons in the 46px bar ((46-16)/2=15).
+    trafficLightPosition: { x: 14, y: 15 },
     webPreferences: {
       preload:          path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -168,6 +172,74 @@ function attachSheetView() {
 
   mainWindow.contentView.addChildView(sheetView);
   sheetView.setBounds(sheetViewBounds());
+
+  // Google rejects Electron's default user agent (it contains "Electron/x.x.x")
+  // on the first auth redirect and shows "unable to do so at this time".
+  // Setting a plain Chrome UA lets Google Sheets' login flow complete normally.
+  sheetView.webContents.setUserAgent(
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
+    'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+    'Chrome/124.0.0.0 Safari/537.36'
+  );
+
+  // Google Sheets registers a beforeunload handler that Electron surfaces as a
+  // native dialog. Without this listener, navigating to a different spreadsheet
+  // silently fails because the dialog is blocked and navigation is cancelled.
+  sheetView.webContents.on('will-prevent-unload', (event) => {
+    event.preventDefault(); // bypass — Google Sheets auto-saves, dialog is unnecessary
+  });
+
+  // Suppress Google's "the app is better" / "get the app" promotional banners.
+  // Google's compiled class names change frequently so CSS selectors are
+  // unreliable. Instead we inject a MutationObserver that scans text content
+  // and removes the element from the DOM entirely — bypassing the broken
+  // dismiss handlers (which fire app-store URL navigations that fail silently
+  // in Electron, leaving the dialog stuck open).
+  const SUPPRESS_SCRIPT = `(function () {
+    const PROMO_PHRASES = [
+      'get the app', 'app is better', 'switch to app',
+      'install the app', 'open in app', 'use the app',
+      'try the app', 'sheets app'
+    ];
+
+    function isPromo(el) {
+      if (!el || typeof el.textContent !== 'string') return false;
+      const t = el.textContent.toLowerCase();
+      return PROMO_PHRASES.some(p => t.includes(p));
+    }
+
+    function sweep() {
+      // Target fixed/sticky elements anywhere on the page — the banner is
+      // always position:fixed at the bottom. Also check common ARIA roles.
+      const candidates = document.querySelectorAll(
+        'body > *, [role="dialog"], [role="banner"], ' +
+        '[role="alertdialog"], [role="complementary"]'
+      );
+      candidates.forEach(el => {
+        try {
+          const s = window.getComputedStyle(el);
+          if (s.position === 'fixed' || s.position === 'sticky') {
+            if (isPromo(el)) { el.remove(); }
+          }
+        } catch (_) {}
+      });
+    }
+
+    sweep();
+
+    new MutationObserver(mutations => {
+      for (const m of mutations) {
+        m.addedNodes.forEach(node => {
+          if (node.nodeType === 1 && isPromo(node)) node.remove();
+        });
+      }
+    }).observe(document.documentElement, { childList: true, subtree: true });
+  })();`;
+
+  sheetView.webContents.on('did-finish-load', () => {
+    sheetView.webContents.executeJavaScript(SUPPRESS_SCRIPT).catch(() => {});
+  });
+
   // Start blank — user opens a sheet via the toolbar URL bar or Drive launcher.
 }
 

@@ -3,6 +3,11 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('flowkit', {
+  // ── Platform ───────────────────────────────────────────────────────────────
+  // Exposed synchronously so the renderer can read it before first paint
+  // (e.g. to add macOS-specific CSS classes without a round-trip).
+  platform: process.platform,
+
   // ── Sheet ──────────────────────────────────────────────────────────────────
 
   // Renderer → Main: load a sheet URL in the WebContentsView
