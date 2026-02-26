@@ -4,6 +4,7 @@
   import Launcher    from './components/Launcher.svelte';
   import Home        from './components/Home.svelte';
   import BlockPanel  from './components/BlockPanel.svelte';
+  import Toast       from './lib/alert.svelte';
   import { launcherOpen, panelOpen } from './stores/uiState.js';
 
   let blockPanel = null;   // bound to BlockPanel instance for focusSearch()
@@ -63,6 +64,8 @@
   {#if $launcherOpen}
     <Launcher />
   {/if}
+
+  <Toast />
 </div>
 
 <style>

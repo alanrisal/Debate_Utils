@@ -73,4 +73,20 @@ async function saveFormatLinks(links) {
   s.set('formatLinks', links);
 }
 
-module.exports = { getTokens, setTokens, getUserInfo, setUserInfo, clearAll, getTemplates, saveTemplates, getTubs, saveTubs, getFormatLinks, saveFormatLinks };
+// ── Recent sheets ─────────────────────────────────────────────────────────────
+// Each entry: { id, name, url, openedAt }
+async function getRecentSheets() {
+  const s = await getStore();
+  return s.get('recentSheets', []);
+}
+
+async function addRecentSheet({ id, name, url }) {
+  const s = await getStore();
+  let recents = s.get('recentSheets', []);
+  recents = recents.filter(r => r.id !== id);
+  recents.unshift({ id, name, url, openedAt: new Date().toISOString() });
+  if (recents.length > 10) recents = recents.slice(0, 10);
+  s.set('recentSheets', recents);
+}
+
+module.exports = { getTokens, setTokens, getUserInfo, setUserInfo, clearAll, getTemplates, saveTemplates, getTubs, saveTubs, getFormatLinks, saveFormatLinks, getRecentSheets, addRecentSheet };

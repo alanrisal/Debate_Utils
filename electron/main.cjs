@@ -25,7 +25,8 @@ for (const envPath of ENV_PATHS) {
 
 const { getTokens, setTokens, getUserInfo, setUserInfo, clearAll,
         getTemplates, saveTemplates, getTubs, saveTubs,
-        getFormatLinks, saveFormatLinks } = require('./store.cjs');
+        getFormatLinks, saveFormatLinks,
+        getRecentSheets, addRecentSheet } = require('./store.cjs');
 const { startAuthFlow, buildClientFromTokens } = require('./auth.cjs');
 const { listFolder, listSharedWithMe, listSharedDrives,
         createFlowSheet, createFlowFromTemplate, addFlowTab,
@@ -36,6 +37,7 @@ const { parseTub } = require('./parser.cjs');
 
 const PANEL_WIDTH    = 300;  // px — matches BlockPanel.svelte width
 const TOOLBAR_HEIGHT = 46;   // px — matches Toolbar.svelte height
+const TOAST_HEIGHT   = 28;   // px — thin strip below toolbar for toast notifications
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -45,6 +47,7 @@ let panelOpen       = false;
 let launcherIsOpen  = false;   // Drive launcher overlay is open
 let paletteIsOpen   = false;   // command palette dropdown is open
 let sheetActive     = false;   // a sheet URL has been loaded (off = home screen)
+let toastVisible    = false;   // toast notification is visible — leave gap at bottom
 let oauth2Client    = null;
 let currentUserInfo = null;
 let currentSheetUrl = '';      // last URL loaded in the sheet view
@@ -78,6 +81,28 @@ async function ensureTubParsed(tub) {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// Convert a raw API / Gaxios error into a clean user-facing message.
+// Throwing this keeps Electron's "Error occurred in handler" log clean
+// and ensures the renderer catch block gets a readable string.
+function friendlyError(e) {
+  const raw = (e?.message || e?.toString() || 'unknown error').toLowerCase();
+  if (raw.includes('not supported for this document'))
+    return new Error('this document is not a native google sheet — excel files opened in drive don\'t support adding tabs');
+  if (raw.includes('not authenticated') || raw.includes('invalid_grant') || raw.includes('token'))
+    return new Error('not authenticated — please sign in again');
+  if (raw.includes('permission') || raw.includes('forbidden') || raw.includes('403'))
+    return new Error('permission denied — you may not have edit access to this sheet');
+  if (raw.includes('not found') || raw.includes('404'))
+    return new Error('document not found — it may have been deleted or moved');
+  if (raw.includes('quota') || raw.includes('429'))
+    return new Error('google api rate limit hit — try again in a moment');
+  if (raw.includes('network') || raw.includes('enotfound') || raw.includes('econnrefused'))
+    return new Error('network error — check your internet connection');
+  // Fall back to the original message, stripped of any stack/gaxios boilerplate
+  const clean = (e?.message || 'unexpected error').split('\n')[0].trim();
+  return new Error(clean);
+}
+
 function sheetViewBounds() {
   const [w, h] = mainWindow.getContentSize();
   // Move the native WebContentsView completely off-screen whenever any Svelte
@@ -85,11 +110,12 @@ function sheetViewBounds() {
   if (!sheetActive || launcherIsOpen || paletteIsOpen) {
     return { x: 0, y: h + TOOLBAR_HEIGHT, width: w, height: h - TOOLBAR_HEIGHT };
   }
+  const topOffset = TOOLBAR_HEIGHT + (toastVisible ? TOAST_HEIGHT : 0);
   return {
     x:      0,
-    y:      TOOLBAR_HEIGHT,
+    y:      topOffset,
     width:  w - (panelOpen ? PANEL_WIDTH : 0),
-    height: h - TOOLBAR_HEIGHT,
+    height: h - topOffset,
   };
 }
 
@@ -300,10 +326,22 @@ ipcMain.on('palette:toggle', (_e, isOpen) => {
   if (sheetView) sheetView.setBounds(sheetViewBounds());
 });
 
+// Renderer awaits this before rendering the toast strip, so the sheet bounds
+// are guaranteed updated before the Svelte component becomes visible.
+ipcMain.handle('toast:toggle', (_e, isVisible) => {
+  toastVisible = Boolean(isVisible);
+  if (sheetView) sheetView.setBounds(sheetViewBounds());
+});
+
 // Renderer close button.
 ipcMain.on('window:close', () => {
   if (mainWindow) mainWindow.close();
 });
+
+// ── Recent sheets ─────────────────────────────────────────────────────────────
+
+ipcMain.handle('recent:get', () => getRecentSheets());
+ipcMain.handle('recent:add', (_e, entry) => addRecentSheet(entry));
 
 // ── Auth / Drive IPC handlers ─────────────────────────────────────────────────
 
@@ -348,25 +386,31 @@ ipcMain.handle('auth:logout', async () => {
 });
 
 ipcMain.handle('drive:listFolder', async (_e, folderId) => {
-    if (!oauth2Client) throw new Error('Not authenticated');
-    const files = await listFolder(oauth2Client, folderId);
-    // console.log('listFolder result:', files.map(f => ({ name: f.name, mimeType: f.mimeType })));     
-    return files;
-  });
+  if (!oauth2Client) throw new Error('not authenticated — please sign in again');
+  try {
+    return await listFolder(oauth2Client, folderId);
+  } catch (e) { throw friendlyError(e); }
+});
 
 ipcMain.handle('drive:listSharedWithMe', async () => {
-  if (!oauth2Client) throw new Error('Not authenticated');
-  return listSharedWithMe(oauth2Client);
+  if (!oauth2Client) throw new Error('not authenticated — please sign in again');
+  try {
+    return await listSharedWithMe(oauth2Client);
+  } catch (e) { throw friendlyError(e); }
 });
 
 ipcMain.handle('drive:listSharedDrives', async () => {
-  if (!oauth2Client) throw new Error('Not authenticated');
-  return listSharedDrives(oauth2Client);
+  if (!oauth2Client) throw new Error('not authenticated — please sign in again');
+  try {
+    return await listSharedDrives(oauth2Client);
+  } catch (e) { throw friendlyError(e); }
 });
 
 ipcMain.handle('drive:searchSheets', async (_e, query) => {
-  if (!oauth2Client) throw new Error('Not authenticated');
-  return searchSheets(oauth2Client, query);
+  if (!oauth2Client) throw new Error('not authenticated — please sign in again');
+  try {
+    return await searchSheets(oauth2Client, query);
+  } catch (e) { throw friendlyError(e); }
 });
 
 // ── Template handlers ─────────────────────────────────────────────────────────
@@ -499,41 +543,45 @@ ipcMain.handle('formatLinks:set', async (_e, { format, templateId }) => {
 // ── Drive / Sheet creation handlers ──────────────────────────────────────────
 
 ipcMain.handle('drive:createSheet', async (_e, params) => {
-  if (!oauth2Client) throw new Error('Not authenticated');
-  return createFlowSheet(oauth2Client, params);
+  if (!oauth2Client) throw new Error('not authenticated — please sign in again');
+  try {
+    return await createFlowSheet(oauth2Client, params);
+  } catch (e) { throw friendlyError(e); }
 });
 
 ipcMain.handle('drive:createFromTemplate', async (_e, params) => {
-  if (!oauth2Client) throw new Error('Not authenticated');
-  return createFlowFromTemplate(oauth2Client, params);
+  if (!oauth2Client) throw new Error('not authenticated — please sign in again');
+  try {
+    return await createFlowFromTemplate(oauth2Client, params);
+  } catch (e) { throw friendlyError(e); }
 });
 
 // On-demand WRAP fix — exposed to the renderer for the palette command.
 ipcMain.handle('sheet:fixWrapping', async (_e, spreadsheetId) => {
-  if (!oauth2Client) throw new Error('Not authenticated');
-  await fixSheetWrapping(oauth2Client, spreadsheetId);
-  wrappingFixedIds.add(spreadsheetId); // mark so auto-fix doesn't re-run
+  if (!oauth2Client) throw new Error('not authenticated — please sign in again');
+  try {
+    await fixSheetWrapping(oauth2Client, spreadsheetId);
+    wrappingFixedIds.add(spreadsheetId);
+  } catch (e) { throw friendlyError(e); }
 });
 
 // ── Sheet tab handler ─────────────────────────────────────────────────────────
 
 ipcMain.handle('sheet:addTab', async (_e, { spreadsheetId, tabName, format }) => {
-  if (!oauth2Client) throw new Error('Not authenticated');
+  if (!oauth2Client) throw new Error('not authenticated — please sign in again');
+  try {
+    const formatLinks    = await getFormatLinks();
+    const copyFirstSheet = !!(formatLinks && formatLinks[format]);
+    const result = await addFlowTab(oauth2Client, { spreadsheetId, tabName, format, copyFirstSheet });
 
-  // If the current format has a user-linked template, copy the first (blank
-  // template) sheet so the new tab inherits the template's formatting instead
-  // of getting a bare sheet with just column headers.
-  const formatLinks     = await getFormatLinks();
-  const copyFirstSheet  = !!(formatLinks && formatLinks[format]);
-
-  const result = await addFlowTab(oauth2Client, { spreadsheetId, tabName, format, copyFirstSheet });
-
-  // Navigate the embedded sheet to the new tab
-  if (sheetView && currentSheetUrl) {
-    const base = currentSheetUrl.split('#')[0];
-    sheetView.webContents.loadURL(`${base}#gid=${result.sheetId}`);
+    if (sheetView && currentSheetUrl) {
+      const base = currentSheetUrl.split('#')[0];
+      sheetView.webContents.loadURL(`${base}#gid=${result.sheetId}`);
+    }
+    return result;
+  } catch (e) {
+    throw friendlyError(e);
   }
-  return result;
 });
 
 

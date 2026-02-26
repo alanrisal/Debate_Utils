@@ -1,13 +1,44 @@
 <script>
-  import { fly, fade } from 'svelte/transition';
-  import { currentSheetUrl } from '../stores/sheetState.js';
+  import { fly } from 'svelte/transition';
+  import { currentSheetUrl, currentSheetIsNative } from '../stores/sheetState.js';
   import { authState } from '../stores/auth.js';
   import { launcherOpen, launcherMode, sheetFormat, panelOpen } from '../stores/uiState.js';
+  import { showToast } from '../stores/toast.js';
 
   let inputValue    = '';
-  let error         = '';
   let isFocused     = false;
   let selectedIndex = 0;
+
+  // ── Recent sheets mode ────────────────────────────────────────────────────
+  let recentMode     = false;
+  let recentSheets   = [];
+  let recentExpanded = false;
+
+  $: isRecent = recentMode && isFocused;
+  $: visibleRecents = recentSheets.slice(0, recentExpanded ? 10 : 5);
+
+  $: if (!isFocused) { recentMode = false; recentExpanded = false; }
+
+  function loadRecents() {
+    window.flowkit?.getRecentSheets().then(r => { recentSheets = r || []; selectedIndex = 0; });
+  }
+
+  function openRecent(entry) {
+    currentSheetIsNative.set(true);
+    currentSheetUrl.set(entry.url);
+    window.flowkit?.openSheet(entry.url);
+    window.flowkit?.addRecentSheet(entry); // bump to top
+    inputValue = ''; isFocused = false; recentMode = false;
+  }
+
+  function fmtDate(iso) {
+    const d = new Date(iso);
+    const now = new Date();
+    const diff = now - d;
+    if (diff < 86400000 && d.getDate() === now.getDate()) return 'today';
+    if (diff < 172800000) return 'yesterday';
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  }
 
   // On macOS with titleBarStyle:'hidden' the traffic light buttons sit inside
   // the toolbar. Reserve left space so they don't collide with toolbar content.
@@ -17,6 +48,7 @@
   let searchResults = [];
   let searching     = false;
   let searchTimeout;
+
 
   $: isSearching = inputValue.startsWith('/');
 
@@ -47,15 +79,17 @@
 
   function openSearchResult(file) {
     const url = `https://docs.google.com/spreadsheets/d/${file.id}/edit`;
+    currentSheetIsNative.set(true);
     currentSheetUrl.set(url);
     window.flowkit?.openSheet(url);
+    window.flowkit?.addRecentSheet({ id: file.id, name: file.name, url });
     inputValue    = '';
     isFocused     = false;
     searchResults = [];
   }
 
   // Move the native sheet view off-screen whenever the palette dropdown is visible.
-  $: window.flowkit?.togglePalette(isFocused && (!inputValue || isSearching));
+  $: window.flowkit?.togglePalette(isFocused && (!inputValue || isSearching || isRecent));
 
   // ── Commands ──────────────────────────────────────────────────────────────
   function goHome() {
@@ -68,7 +102,8 @@
     { id: 'open', label: 'open drive library', shortcut: 'O', action: () => { launcherMode.set('open');     launcherOpen.set(true); } },
     { id: 'new',  label: 'create new flow',    shortcut: 'N', action: () => { launcherMode.set('new-flow'); launcherOpen.set(true); } },
     ...($currentSheetUrl ? [{ id: 'wrap', label: fixingWrap ? 'fixing wrap…' : 'fix row wrapping', shortcut: 'W', action: runFixWrap }] : []),
-    { id: 'exit', label: 'terminate session',  shortcut: '⎋', action: () => window.flowkit?.closeWindow() },
+    { id: 'recent', label: 'open recent sheet',   shortcut: 'R', action: () => { recentMode = true; recentExpanded = false; loadRecents(); } },
+    { id: 'exit',   label: 'terminate session',   shortcut: '⎋', action: () => window.flowkit?.closeWindow() },
     { id: 'select', label: 'find specific sheet', shortcut: '/', action: () => { inputValue = '/'; isFocused = true; setTimeout(() => document.getElementById('topbar-input')?.focus(), 0); } },
   ];
 
@@ -77,8 +112,14 @@
     const tag      = document.activeElement?.tagName;
     const isTyping = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 
-    // '>' toggles the palette from anywhere outside an existing input
-    if (e.key === '>' && !isTyping) {
+    // ctrl+/ toggles the palette from anywhere outside an existing input
+    /**
+     * Handles keyboard shortcut for opening search/command palette.
+     * Triggers when user presses Ctrl+/ (Cmd+/ on Mac).
+     * The !istyping check is unnecessary since it is a ctrl-shortcut.
+     * If the user is on macOs, the cmd key will trigger the same event as ctrl, so the shortcut will work without modification.
+     */
+    if (e.key === '/' && e.ctrlKey) {
       e.preventDefault();
       if (isFocused) {
         isFocused     = false;
@@ -94,7 +135,7 @@
 
     if (!isFocused) return;
 
-    const activeList = isSearching ? searchResults : commands;
+    const activeList = isRecent ? visibleRecents : (isSearching ? searchResults : commands);
 
     if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -104,7 +145,9 @@
       if (activeList.length) selectedIndex = (selectedIndex - 1 + activeList.length) % activeList.length;
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      if (isSearching) {
+      if (isRecent) {
+        if (visibleRecents[selectedIndex]) openRecent(visibleRecents[selectedIndex]);
+      } else if (isSearching) {
         if (searchResults[selectedIndex]) openSearchResult(searchResults[selectedIndex]);
       } else if (!inputValue) {
         commands[selectedIndex]?.action();
@@ -113,16 +156,17 @@
         processUrl();
       }
     } else if (e.key === 'Escape') {
-      isFocused     = false;
-      inputValue    = '';
-      searchResults = [];
-    } else if (!inputValue && !isSearching) {
+      if (recentMode) { recentMode = false; }
+      else { isFocused = false; inputValue = ''; searchResults = []; }
+    } else if (!inputValue && !isSearching && !isRecent) {
       // Single-letter shortcuts when palette is open with no text typed
       switch (e.key.toLowerCase()) {
         case 'o': e.preventDefault(); commands.find(c => c.id === 'open')?.action(); isFocused = false; break;
         case 'n': e.preventDefault(); commands.find(c => c.id === 'new')?.action();  isFocused = false; break;
         case 'b': e.preventDefault(); commands.find(c => c.id === 'home')?.action(); isFocused = false; break;
         case 'w': e.preventDefault(); commands.find(c => c.id === 'wrap')?.action(); isFocused = false; break;
+        case '/': e.preventDefault(); commands.find(c => c.id === 'select')?.action(); break;
+        case 'r': e.preventDefault(); recentMode = true; recentExpanded = false; loadRecents(); break;
       }
     }
   }
@@ -131,13 +175,16 @@
   function processUrl() {
     const url = inputValue.trim();
     if (url.includes('docs.google.com/spreadsheets')) {
+      currentSheetIsNative.set(true);
       currentSheetUrl.set(url);
       window.flowkit?.openSheet(url);
+      const idMatch = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+      const id = idMatch?.[1] || url;
+      window.flowkit?.addRecentSheet({ id, name: 'pasted sheet', url });
       inputValue = '';
       isFocused  = false;
     } else {
-      error = 'invalid source';
-      setTimeout(() => (error = ''), 2000);
+      showToast('invalid source — paste a google sheets url');
     }
   }
 
@@ -165,6 +212,10 @@
   }
 
   async function addTab(tabName) {
+    if (!$currentSheetIsNative) {
+      showToast('flowkit only supports adding flow sheets to google sheets docs — switch to a doc with a green icon, or make a new flow from a template', 'warning', 6000);
+      return;
+    }
     const match = $currentSheetUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
     const spreadsheetId = match?.[1];
     if (!spreadsheetId || !window.flowkit) return;
@@ -172,8 +223,7 @@
     try {
       await window.flowkit.addFlowTab({ spreadsheetId, tabName, format: $sheetFormat });
     } catch (e) {
-      error = e.message || 'failed to add tab';
-      setTimeout(() => (error = ''), 2500);
+      showToast(e.message || 'failed to add tab');
     } finally {
       addingTab = false;
     }
@@ -217,19 +267,40 @@
         id="topbar-input"
         type="text"
         bind:value={inputValue}
-        on:focus={() => { isFocused = true; }}
+        on:focus={() => { isFocused = true; inputValue = ''; selectedIndex = 0; }}
         on:blur={() => setTimeout(() => { isFocused = false; }, 200)}
-        placeholder={isFocused ? 'select command, paste link, or / to search…' : '> open commands'}
+        placeholder={isFocused ? 'select command, paste link, or / to search…' : 'ctrl+/ open commands'}
         spellcheck="false"
       />
-      {#if error}
-        <span class="error-tag" transition:fade>{error}</span>
-      {/if}
     </div>
 
-    {#if isFocused && (!inputValue || isSearching)}
+    {#if isFocused && (!inputValue || isSearching || isRecent)}
       <div class="palette" in:fly={{ y: -5, duration: 100 }}>
-        {#if isSearching}
+        {#if isRecent}
+          {#if recentSheets.length === 0}
+            <div class="palette-msg">no recent sheets yet</div>
+          {:else}
+            <div class="palette-section-label">recent</div>
+            {#each visibleRecents as entry, i}
+              <!-- svelte-ignore a11y-click-events-have-key-events -->
+              <button
+                class="palette-item"
+                class:selected={i === selectedIndex}
+                on:click={() => openRecent(entry)}
+                on:mouseenter={() => (selectedIndex = i)}
+              >
+                <span class="cmd-label"><span class="file-icon">⊞</span>{entry.name}</span>
+                <span class="cmd-shortcut recent-date">{fmtDate(entry.openedAt)}</span>
+              </button>
+            {/each}
+            {#if recentSheets.length > 5 && !recentExpanded}
+              <!-- svelte-ignore a11y-click-events-have-key-events -->
+              <button class="palette-more" on:click={() => { recentExpanded = true; }}>
+                ▾ show {recentSheets.length - 5} more
+              </button>
+            {/if}
+          {/if}
+        {:else if isSearching}
           {#if searching}
             <div class="palette-msg">searching drive…</div>
           {:else if searchResults.length > 0}
@@ -433,8 +504,6 @@
   }
   input::placeholder { color: var(--text-dim); text-transform: lowercase; }
 
-  .error-tag { color: #ff4545; font-size: 12px; text-transform: uppercase; }
-
   /* ── Palette dropdown ─────────────────────────────────────────────────── */
   .palette {
     position: absolute;
@@ -474,6 +543,32 @@
   }
 
   .file-icon { color: #1a73e8; margin-right: 6px; font-size: 13px; }
+
+  .palette-section-label {
+    padding: 6px 12px 3px;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+
+  .recent-date { font-size: 11px; color: var(--text-dim); }
+  .palette-item.selected .recent-date { color: #555; }
+
+  .palette-more {
+    width: 100%;
+    padding: 7px 12px;
+    background: none;
+    border: none;
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    text-align: left;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+  }
+  .palette-more:hover { color: var(--text-main); }
 
   /* ── Right ────────────────────────────────────────────────────────────── */
   .identity {

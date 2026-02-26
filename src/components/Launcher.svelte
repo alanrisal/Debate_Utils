@@ -9,8 +9,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { launcherOpen, launcherNewFormat, launcherMode } from '../stores/uiState.js';
-  import { currentSheetUrl } from '../stores/sheetState.js';
+  import { currentSheetUrl, currentSheetIsNative } from '../stores/sheetState.js';
   import { authState } from '../stores/auth.js';
+  import { showToast } from '../stores/toast.js';
 
   // ── constants ─────────────────────────────────────────────────────────────
   const FOLDER_MIME = 'application/vnd.google-apps.folder';
@@ -28,7 +29,6 @@
   let sharedDrives = [];   // loaded once when home is shown
   let items        = [];   // current folder / sharedWithMe contents
   let loading      = false;
-  let error        = '';
   let search       = '';
   let searchInput;
   let unsubAuth;
@@ -71,7 +71,6 @@
   async function loadLocation(location) {
     if (!window.flowkit) return;
     loading = true;
-    error   = '';
     search  = '';
     try {
       if (!location) {
@@ -85,7 +84,7 @@
         items = await window.flowkit.listFolder(location.id);
       }
     } catch (e) {
-      error = e.message || 'Failed to load';
+      showToast(e.message || 'failed to load folder');
     } finally {
       loading = false;
     }
@@ -113,10 +112,12 @@
   function openSheet(file) {
     // .xlsx files: Drive provides a webViewLink that opens them in the Sheets editor.
     // Native Google Sheets: construct the edit URL directly.
-    const url = (isXlsx(file) && file.webViewLink)
+    const native = !isXlsx(file);
+    const url = (!native && file.webViewLink)
       ? file.webViewLink
       : `https://docs.google.com/spreadsheets/d/${file.id}/edit`;
-    currentSheetUrl.set(url);   // update the Svelte store so the back button appears
+    currentSheetIsNative.set(native); // track doc type so Toolbar can gate tab creation
+    currentSheetUrl.set(url);
     window.flowkit?.openSheet(url);
     launcherOpen.set(false);
   }
@@ -249,11 +250,12 @@
       await loadLocation(loc);
       showNewFlow = false;
       const url = `https://docs.google.com/spreadsheets/d/${file.id}/edit`;
-      currentSheetUrl.set(url);   // update store so the back button appears
+      currentSheetIsNative.set(true); // new flows are always native Google Sheets
+      currentSheetUrl.set(url);
       window.flowkit?.openSheet(url);
       launcherOpen.set(false);
     } catch (e) {
-      createError = e.message || 'failed to create';
+      showToast(e.message || 'failed to create flow');
     } finally {
       creating = false;
     }
@@ -268,13 +270,12 @@
   async function signIn() {
     if (!window.flowkit) return;
     loading = true;
-    error   = '';
     try {
       const result = await window.flowkit.startAuth();
       authState.set({ loggedIn: result.loggedIn, userInfo: result.userInfo });
       if (result.loggedIn) await loadLocation(null);
     } catch (e) {
-      error = e.message || 'Sign in failed';
+      showToast(e.message || 'sign in failed');
     } finally {
       loading = false;
     }
@@ -351,14 +352,10 @@
         <button class="sign-in-btn" on:click={signIn} disabled={loading}>
           {loading ? 'connecting…' : 'connect google drive'}
         </button>
-        {#if error}<p class="error-text">{error}</p>{/if}
       </div>
 
     {:else if loading}
       <div class="state-msg">loading…</div>
-
-    {:else if error}
-      <div class="state-msg error-text">{error}</div>
 
     {:else if isHome}
       <ul class="file-list">
@@ -486,7 +483,7 @@
     z-index: 200;
     display: flex;
     justify-content: center;
-    padding-top: 72px;
+    padding-top: 100px;
   }
 
   /* ── modal card ───────────────────────────────────────────────────────── */

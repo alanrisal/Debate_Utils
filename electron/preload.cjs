@@ -58,6 +58,11 @@ contextBridge.exposeInMainWorld('flowkit', {
   // Main moves the sheet view off-screen so the dropdown is clickable.
   togglePalette: (isOpen) => ipcRenderer.send('palette:toggle', isOpen),
 
+  // Tell main a toast notification is visible so it pushes the sheet view down,
+  // letting the Svelte toast strip render above the native layer.
+  // Returns a promise so callers can await the bounds update before rendering.
+  toggleToast: (isVisible) => ipcRenderer.invoke('toast:toggle', isVisible),
+
   // Navigate back to the home screen — main restores homeIsVisible.
   goHome: () => ipcRenderer.send('home:show'),
 
@@ -112,6 +117,10 @@ contextBridge.exposeInMainWorld('flowkit', {
     ipcRenderer.on('panel:focus-search', handler);
     return () => ipcRenderer.off('panel:focus-search', handler);
   },
+
+  // ── Recent sheets ─────────────────────────────────────────────────────────
+  getRecentSheets: ()      => ipcRenderer.invoke('recent:get'),
+  addRecentSheet:  (entry) => ipcRenderer.invoke('recent:add', entry),
 
   // Main → Renderer: auth completed (e.g. triggered externally).
   // Returns an unsubscribe function.
