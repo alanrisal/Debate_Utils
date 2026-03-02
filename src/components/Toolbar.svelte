@@ -103,8 +103,9 @@
     { id: 'new',  label: 'create new flow',    shortcut: 'N', action: () => { launcherMode.set('new-flow'); launcherOpen.set(true); } },
     ...($currentSheetUrl ? [{ id: 'wrap', label: fixingWrap ? 'fixing wrap…' : 'fix row wrapping', shortcut: 'W', action: runFixWrap }] : []),
     { id: 'recent', label: 'open recent sheet',   shortcut: 'R', action: () => { recentMode = true; recentExpanded = false; isFocused = true; loadRecents(); } },
-    { id: 'exit',   label: 'terminate session',   shortcut: '⎋', action: () => window.flowkit?.closeWindow() },
     { id: 'select', label: 'find specific sheet', shortcut: '/', action: () => { inputValue = '/'; isFocused = true; setTimeout(() => document.getElementById('topbar-input')?.focus(), 0); } },
+    { id: 'exit',   label: 'terminate session',   shortcut: '⎋', action: () => window.flowkit?.closeWindow() }
+
   ];
 
   // ── Single keydown handler (on window) ────────────────────────────────────
