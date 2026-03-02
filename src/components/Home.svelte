@@ -118,7 +118,7 @@
                   <div class="link-active">
                     <span class="link-icon">↳</span>
                     <span class="link-name">{linked.name}</span>
-                    <button class="link-unlink" on:click={() => setFormatLink(tmpl.format, null)} title="Remove link">×</button>
+                    <button class="link-unlink" on:click={() => setFormatLink(tmpl.format, null)} title="Remove link">swap template</button>
                   </div>
                 {:else if userTemplates.length > 0}
                   <select
@@ -609,8 +609,8 @@
 .link-unlink {
   background: none;
   border: none;
-  color: #333;
-  font-size: 0.86rem;
+  color: #616161;
+  font-size: 0.7rem;
   cursor: pointer;
   padding: 0 2px;
   font-family: var(--font-mono);
