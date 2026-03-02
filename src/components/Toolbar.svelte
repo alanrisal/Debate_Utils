@@ -274,7 +274,7 @@
       />
     </div>
 
-    {#if isFocused && (!inputValue || isSearching || isRecent)}
+    {#if isFocused && (!inputValue || isRecent)}
       <!-- svelte-ignore a11y-no-static-element-interactions -->
       <div class="palette" in:fly={{ y: -5, duration: 100 }} on:mousedown|preventDefault>
         {#if isRecent}
@@ -301,27 +301,6 @@
               </button>
             {/if}
           {/if}
-        {:else if isSearching}
-          {#if searching}
-            <div class="palette-msg">searching drive…</div>
-          {:else if searchResults.length > 0}
-            {#each searchResults as file, i}
-              <!-- svelte-ignore a11y-click-events-have-key-events -->
-              <button
-                class="palette-item"
-                class:selected={i === selectedIndex}
-                on:click={() => openSearchResult(file)}
-                on:mouseenter={() => (selectedIndex = i)}
-              >
-                <span class="cmd-label"><span class="file-icon">⊞</span>{file.name}</span>
-                <span class="cmd-shortcut">open</span>
-              </button>
-            {/each}
-          {:else if inputValue.length > 1}
-            <div class="palette-msg">no sheets found for "{inputValue.slice(1)}"</div>
-          {:else}
-            <div class="palette-msg">type to search your drive…</div>
-          {/if}
         {:else}
           {#each commands as cmd, i}
             <!-- svelte-ignore a11y-click-events-have-key-events -->
@@ -335,6 +314,31 @@
               <span class="cmd-shortcut">{cmd.shortcut}</span>
             </button>
           {/each}
+        {/if}
+      </div>
+    {/if}
+    {#if isSearching}
+      <!-- svelte-ignore a11y-no-static-element-interactions -->
+      <div class="palette" in:fly={{ y: -5, duration: 100 }} on:mousedown|preventDefault>
+        {#if searching}
+          <div class="palette-msg">searching drive…</div>
+        {:else if searchResults.length > 0}
+          {#each searchResults as file, i}
+            <!-- svelte-ignore a11y-click-events-have-key-events -->
+            <button
+              class="palette-item"
+              class:selected={i === selectedIndex}
+              on:click={() => openSearchResult(file)}
+              on:mouseenter={() => (selectedIndex = i)}
+            >
+              <span class="cmd-label"><span class="file-icon">⊞</span>{file.name}</span>
+              <span class="cmd-shortcut">open</span>
+            </button>
+          {/each}
+        {:else if inputValue.length > 1}
+          <div class="palette-msg">no sheets found for "{inputValue.slice(1)}"</div>
+        {:else}
+          <div class="palette-msg">type to search your drive…</div>
         {/if}
       </div>
     {/if}
