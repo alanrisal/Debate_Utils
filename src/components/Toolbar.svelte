@@ -216,7 +216,10 @@
     if (!spreadsheetId || !window.flowkit) return;
     addingTab = true;
     try {
-      await window.flowkit.addFlowTab({ spreadsheetId, tabName, format: $sheetFormat });
+      const result = await window.flowkit.addFlowTab({ spreadsheetId, tabName, format: $sheetFormat });
+      if (!result?.usedTemplate) {
+        showToast('no template linked — tab created with default column formatting', 'warning');
+      }
     } catch (e) {
       showToast(e.message || 'failed to add tab');
     } finally {

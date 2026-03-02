@@ -239,6 +239,7 @@
           });
         } else {
           // Path 3: no custom template — use Sheets API with column headers
+          showToast('no template linked — creating flow with default column formatting', 'warning');
           file = await window.flowkit.createFlowSheet({
             name,
             folderId: loc.id,
