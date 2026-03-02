@@ -102,7 +102,7 @@
     { id: 'open', label: 'open drive library', shortcut: 'O', action: () => { launcherMode.set('open');     launcherOpen.set(true); } },
     { id: 'new',  label: 'create new flow',    shortcut: 'N', action: () => { launcherMode.set('new-flow'); launcherOpen.set(true); } },
     ...($currentSheetUrl ? [{ id: 'wrap', label: fixingWrap ? 'fixing wrap…' : 'fix row wrapping', shortcut: 'W', action: runFixWrap }] : []),
-    { id: 'recent', label: 'open recent sheet',   shortcut: 'R', action: () => { recentMode = true; recentExpanded = false; loadRecents(); } },
+    { id: 'recent', label: 'open recent sheet',   shortcut: 'R', action: () => { recentMode = true; recentExpanded = false; isFocused = true; loadRecents(); } },
     { id: 'exit',   label: 'terminate session',   shortcut: '⎋', action: () => window.flowkit?.closeWindow() },
     { id: 'select', label: 'find specific sheet', shortcut: '/', action: () => { inputValue = '/'; isFocused = true; setTimeout(() => document.getElementById('topbar-input')?.focus(), 0); } },
   ];
@@ -151,7 +151,7 @@
         if (searchResults[selectedIndex]) openSearchResult(searchResults[selectedIndex]);
       } else if (!inputValue) {
         commands[selectedIndex]?.action();
-        isFocused = false;
+        if (!recentMode) isFocused = false;
       } else {
         processUrl();
       }
@@ -166,7 +166,7 @@
         case 'b': e.preventDefault(); commands.find(c => c.id === 'home')?.action(); isFocused = false; break;
         case 'w': e.preventDefault(); commands.find(c => c.id === 'wrap')?.action(); isFocused = false; break;
         case '/': e.preventDefault(); commands.find(c => c.id === 'select')?.action(); break;
-        case 'r': e.preventDefault(); recentMode = true; recentExpanded = false; loadRecents(); break;
+        case 'r': e.preventDefault(); recentMode = true; recentExpanded = false; isFocused = true;loadRecents(); break;
       }
     }
   }
@@ -275,7 +275,8 @@
     </div>
 
     {#if isFocused && (!inputValue || isSearching || isRecent)}
-      <div class="palette" in:fly={{ y: -5, duration: 100 }}>
+      <!-- svelte-ignore a11y-no-static-element-interactions -->
+      <div class="palette" in:fly={{ y: -5, duration: 100 }} on:mousedown|preventDefault>
         {#if isRecent}
           {#if recentSheets.length === 0}
             <div class="palette-msg">no recent sheets yet</div>

@@ -10,6 +10,13 @@ const EXCEL_MIME_LEGACY  = 'application/vnd.ms-excel'; // catches older .xls fil
 const EXCEL_MIME_MACRO   = 'application/vnd.ms-excel.sheet.macroenabled.12'; // .xlsm
 const SHEET_FILTER = `(mimeType='${SHEET_MIME}' or mimeType='${EXCEL_MIME}' or mimeType='${EXCEL_MIME_LEGACY}' or mimeType='${EXCEL_MIME_MACRO}')`;
 
+// Fetch just the name of a single spreadsheet by its ID.
+async function getSheetTitle(auth, spreadsheetId) {
+  const drive = google.drive({ version: 'v3', auth });
+  const res   = await drive.files.get({ fileId: spreadsheetId, fields: 'name', supportsAllDrives: true });
+  return res.data.name || 'untitled sheet';
+}
+
 // List all folders + spreadsheets (Google Sheets and .xlsx) inside a given folder.
 // Uses corpora:'allDrives' so files created by ANY member of a shared drive
 // are returned — corpora:'drive' silently drops non-owner files in subfolders.
@@ -414,4 +421,4 @@ async function fixSheetWrapping(auth, spreadsheetId) {
   });
 }
 
-module.exports = { listFolder, listSharedWithMe, listSharedDrives, createFlowSheet, createFlowFromTemplate, addFlowTab, searchSheets, fixSheetWrapping };
+module.exports = { listFolder, listSharedWithMe, listSharedDrives, createFlowSheet, createFlowFromTemplate, addFlowTab, searchSheets, fixSheetWrapping, getSheetTitle };

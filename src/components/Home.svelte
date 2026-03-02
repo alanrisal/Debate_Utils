@@ -286,7 +286,7 @@
   
   .tcard {
   padding: 14px 16px;
-  background: #0d0d0d;
+  background: #161616;
   border: 1px solid #161616;
   border-radius: 6px;
   cursor: pointer;
@@ -300,7 +300,7 @@
 .tcard:hover {
   transform: translateY(-2px);
   border-color: #2a2a2a;
-  background: #111;
+  background: #2d2c2d;
   box-shadow:
     0 6px 20px rgba(0,0,0,0.6),
     inset 0 1px 0 rgba(255,255,255,0.03);
@@ -362,7 +362,7 @@
     align-items: center;
     gap: 10px;
     padding: 9px 12px;
-    background: #0c0c0c;
+    background: #161616;
     border: 1px solid #131313;
     border-radius: 3px;
     margin-bottom: 6px;
@@ -380,8 +380,8 @@
     margin-top: 2px;
   }
 
-  .tmpl-dot { background: #1f1f1f; }
-  .tub-dot  { background: #2a2a2a; }
+  .tmpl-dot { background: #474747; }
+  .tub-dot  { background: #474747; }
 
   .file-info {
     flex: 1;
@@ -477,7 +477,7 @@
 }
 
 .file-row:hover {
-  background: #111;
+  background: #2d2c2d;
   border-color: #1f1f1f;
   transform: translateX(2px);
   box-shadow: 0 4px 14px rgba(0,0,0,0.5);

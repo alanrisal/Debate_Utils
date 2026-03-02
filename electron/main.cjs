@@ -30,7 +30,7 @@ const { getTokens, setTokens, getUserInfo, setUserInfo, clearAll,
 const { startAuthFlow, buildClientFromTokens } = require('./auth.cjs');
 const { listFolder, listSharedWithMe, listSharedDrives,
         createFlowSheet, createFlowFromTemplate, addFlowTab,
-        searchSheets, fixSheetWrapping } = require('./sheets-api.cjs');
+        searchSheets, fixSheetWrapping, getSheetTitle } = require('./sheets-api.cjs');
 const { parseTub } = require('./parser.cjs');
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -302,6 +302,17 @@ ipcMain.on('sheet:open', (_e, url) => {
     wrappingFixedIds.add(spreadsheetId);
     fixSheetWrapping(oauth2Client, spreadsheetId)
       .catch(e => console.error('fixSheetWrapping:', e.message));
+  }
+
+  // Record in recents — fetch the sheet title from Drive, fall back to URL if unauthenticated.
+  if (spreadsheetId) {
+    (async () => {
+      let name = 'untitled sheet';
+      if (oauth2Client) {
+        try { name = await getSheetTitle(oauth2Client, spreadsheetId); } catch {}
+      }
+      await addRecentSheet({ id: spreadsheetId, name, url });
+    })();
   }
 });
 
