@@ -3,6 +3,8 @@
   import { blocks, activeTubId, loadTub } from '../stores/blockIndex.js';
   import { search } from '../lib/search.js';
 
+  const isMac = typeof window !== 'undefined' && window.flowkit?.platform === 'darwin';
+
   // ── Tub registry ──────────────────────────────────────────────────────────
   let tubs        = [];
   let loadingTub  = false;
@@ -190,7 +192,7 @@
   <span class="sep">·</span>
   <span>esc clear</span>
   <span class="sep">·</span>
-  <span>ctrl+k close</span>
+  <span>{isMac ? 'cmd+k' : 'ctrl+k'} close</span>
 </div>
 
 <style>

@@ -113,14 +113,8 @@
     const tag      = document.activeElement?.tagName;
     const isTyping = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 
-    // ctrl+/ toggles the palette from anywhere outside an existing input
-    /**
-     * Handles keyboard shortcut for opening search/command palette.
-     * Triggers when user presses Ctrl+/ (Cmd+/ on Mac).
-     * The !istyping check is unnecessary since it is a ctrl-shortcut.
-     * If the user is on macOs, the cmd key will trigger the same event as ctrl, so the shortcut will work without modification.
-     */
-    if (e.key === '/' && e.ctrlKey) {
+    // Ctrl+/ (Win/Linux) or Cmd+/ (Mac) toggles the palette.
+    if (e.key === '/' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       if (isFocused) {
         isFocused     = false;
@@ -270,7 +264,7 @@
         bind:value={inputValue}
         on:focus={() => { isFocused = true; inputValue = ''; selectedIndex = 0; }}
         on:blur={() => setTimeout(() => { isFocused = false; }, 200)}
-        placeholder={isFocused ? 'select command, paste link, or / to search…' : 'ctrl+/ open commands'}
+        placeholder={isFocused ? 'select command, paste link, or / to search…' : (isMac ? 'cmd+/ open commands' : 'ctrl+/ open commands')}
         spellcheck="false"
       />
     </div>
