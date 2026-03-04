@@ -287,11 +287,28 @@ ipcMain.on('panel:toggle-request', () => {
 
 // Renderer asks main to load a sheet URL — bring the view on-screen.
 ipcMain.on('sheet:open', (_e, url) => {
+  const prevBase = currentSheetUrl.split('#')[0];
+  const newBase  = url.split('#')[0];
+  const newHash  = url.includes('#') ? url.split('#')[1] : null;
+
   currentSheetUrl = url;
   sheetActive     = true;
+
   if (sheetView) {
-    sheetView.webContents.loadURL(url);
     sheetView.setBounds(sheetViewBounds());
+
+    if (sheetActive && prevBase === newBase && newHash) {
+      // Same spreadsheet already loaded — hash-only navigation (no network round-trip).
+      // Safe because the Sheets client already knows every tab in this file.
+      sheetView.webContents
+        .executeJavaScript(`window.location.hash = '${newHash}'`)
+        .catch(() => sheetView.webContents.loadURL(url)); // fallback if JS context unavailable
+    } else {
+      // Different spreadsheet, first open, or no hash — full load required.
+      // Also handles first-time login: the Sheets page must load fresh so
+      // Google's auth cookies are processed and the user lands in the right account.
+      sheetView.webContents.loadURL(url);
+    }
   }
 
   // Silently apply WRAP to all tabs once per session per spreadsheet.
