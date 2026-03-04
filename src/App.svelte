@@ -6,6 +6,7 @@
   import BlockPanel  from './components/BlockPanel.svelte';
   import Toast       from './lib/alert.svelte';
   import { launcherOpen, panelOpen } from './stores/uiState.js';
+  import { showToast } from './stores/toast.js';
 
   let blockPanel = null;   // bound to BlockPanel instance for focusSearch()
   import { currentSheetUrl } from './stores/sheetState.js';
@@ -35,10 +36,21 @@
       window.flowkit.toggleLauncher(isOpen);
     });
 
+    // Google's CEF detection blocked sign-in inside the sheet view.
+    // Tell the user to sign in via the FlowKit button instead.
+    const unsubCef = window.flowkit.onCefBlocked?.(() => {
+      showToast(
+        'google blocked sign-in in embedded view — use the sign in button in the top bar',
+        'error',
+        7000
+      );
+    });
+
     return () => {
       unsubPanel();
       unsubFocus();
       unsubLauncher();
+      unsubCef?.();
     };
   });
 </script>

@@ -189,10 +189,16 @@ function createWindow() {
 // ── Sheet BrowserView (WebContentsView) ──────────────────────────────────────
 
 function attachSheetView() {
+  // 'persist:flowkit-sheets' gives the WebContentsView its own cookie/storage
+  // partition that survives across app restarts. Without this, every cold open
+  // starts with zero Google session cookies and forces a full sign-in — which
+  // is when Google's CEF detection triggers the "Sign in with a supported
+  // browser" block. With persistence, users sign in once and stay signed in.
   sheetView = new WebContentsView({
     webPreferences: {
       contextIsolation: true,
       nodeIntegration:  false,
+      partition:        'persist:flowkit-sheets',
     },
   });
 
@@ -208,12 +214,24 @@ function attachSheetView() {
 
   // Google rejects Electron's default user agent (it contains "Electron/x.x.x")
   // on the first auth redirect and shows "unable to do so at this time".
-  // Setting a plain Chrome UA lets Google Sheets' login flow complete normally.
+  // Setting a current Chrome UA lets Google Sheets' login flow complete normally.
+  // Keep the version reasonably current — an old Chrome version also triggers
+  // Google's browser checks.
   sheetView.webContents.setUserAgent(
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
     'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-    'Chrome/124.0.0.0 Safari/537.36'
+    'Chrome/133.0.0.0 Safari/537.36'
   );
+
+  // If Google's CEF detection triggers ("Sign in with a supported browser"),
+  // the page navigates to accounts.google.com with a rejection indicator.
+  // Intercept it and tell the renderer to show a recovery prompt instead of
+  // leaving the user stranded on a Google error page.
+  sheetView.webContents.on('did-navigate', (_event, url) => {
+    if (/accounts\.google\.com.*(signin\/rejected|unsupported_browser|nomatch)/i.test(url)) {
+      if (mainWindow) mainWindow.webContents.send('auth:cef-blocked');
+    }
+  });
 
   // Google Sheets registers a beforeunload handler that Electron surfaces as a
   // native dialog. Without this listener, navigating to a different spreadsheet

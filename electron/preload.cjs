@@ -129,4 +129,13 @@ contextBridge.exposeInMainWorld('flowkit', {
     ipcRenderer.on('auth:complete', handler);
     return () => ipcRenderer.off('auth:complete', handler);
   },
+
+  // Main → Renderer: Google's CEF detection blocked sign-in inside the sheet view.
+  // Renderer should surface a recovery prompt telling the user to sign in via
+  // the FlowKit sign-in button instead.
+  onCefBlocked: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on('auth:cef-blocked', handler);
+    return () => ipcRenderer.off('auth:cef-blocked', handler);
+  },
 });
