@@ -586,15 +586,15 @@ ipcMain.handle('sheet:addTab', async (_e, { spreadsheetId, tabName, format }) =>
     const result = await addFlowTab(oauth2Client, { spreadsheetId, tabName, format, copyFirstSheet });
 
     if (sheetView && currentSheetUrl) {
-      // Hash-only navigation avoids a full page reload. Google Sheets listens
-      // for hashchange events and switches tabs client-side. Falls back to a
-      // full loadURL if executeJavaScript is unavailable for any reason.
-      sheetView.webContents.executeJavaScript(
-        `window.location.hash = 'gid=${result.sheetId}'`
-      ).catch(() => {
-        const base = currentSheetUrl.split('#')[0];
-        sheetView.webContents.loadURL(`${base}#gid=${result.sheetId}`);
-      });
+      // Always do a full loadURL reload rather than a hash-only navigation.
+      // Hash-change (window.location.hash = 'gid=X') relies on Google Sheets'
+      // in-page client already knowing about the new tab. For a tab just created
+      // via the API, the client hasn't synced it yet, so the hashchange sends
+      // Sheets into an infinite loading state with the blue bar never completing.
+      // A full reload forces Sheets to fetch fresh data (which includes the new tab)
+      // and then navigate directly to the correct gid on load.
+      const base = currentSheetUrl.split('#')[0];
+      sheetView.webContents.loadURL(`${base}#gid=${result.sheetId}`);
     }
     return { ...result, usedTemplate: copyFirstSheet };
   } catch (e) {
