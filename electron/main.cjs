@@ -199,6 +199,13 @@ function attachSheetView() {
   mainWindow.contentView.addChildView(sheetView);
   sheetView.setBounds(sheetViewBounds());
 
+  // Grant clipboard read/write permissions so Google Sheets' Edit-menu
+  // copy/cut/paste works without showing the "install Chrome extension" prompt.
+  sheetView.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
+    const allowed = ['clipboard-read', 'clipboard-write', 'clipboard-sanitized-write'];
+    callback(allowed.includes(permission));
+  });
+
   // Google rejects Electron's default user agent (it contains "Electron/x.x.x")
   // on the first auth redirect and shows "unable to do so at this time".
   // Setting a plain Chrome UA lets Google Sheets' login flow complete normally.
@@ -225,7 +232,8 @@ function attachSheetView() {
     const PROMO_PHRASES = [
       'get the app', 'app is better', 'switch to app',
       'install the app', 'open in app', 'use the app',
-      'try the app', 'sheets app'
+      'try the app', 'sheets app',
+      'chrome extension', 'install this google'
     ];
 
     function isPromo(el) {
@@ -603,15 +611,18 @@ ipcMain.handle('sheet:addTab', async (_e, { spreadsheetId, tabName, format }) =>
     const result = await addFlowTab(oauth2Client, { spreadsheetId, tabName, format, copyFirstSheet });
 
     if (sheetView && currentSheetUrl) {
-      // Always do a full loadURL reload rather than a hash-only navigation.
-      // Hash-change (window.location.hash = 'gid=X') relies on Google Sheets'
-      // in-page client already knowing about the new tab. For a tab just created
-      // via the API, the client hasn't synced it yet, so the hashchange sends
-      // Sheets into an infinite loading state with the blue bar never completing.
-      // A full reload forces Sheets to fetch fresh data (which includes the new tab)
-      // and then navigate directly to the correct gid on load.
-      const base = currentSheetUrl.split('#')[0];
-      sheetView.webContents.loadURL(`${base}#gid=${result.sheetId}`);
+      // Google Sheets pushes new tab data to its running client via WebSocket
+      // within ~1s of the API call. We wait 1400ms then use hash-only navigation
+      // (no page reload, no loading screen). If the JS context is unavailable
+      // we fall back to a full reload as a safety net.
+      const base    = currentSheetUrl.split('#')[0];
+      const gid     = result.sheetId;
+      setTimeout(() => {
+        if (!sheetView) return;
+        sheetView.webContents
+          .executeJavaScript(`window.location.hash = 'gid=${gid}'`)
+          .catch(() => sheetView.webContents.loadURL(`${base}#gid=${gid}`));
+      }, 1400);
     }
     return { ...result, usedTemplate: copyFirstSheet };
   } catch (e) {
