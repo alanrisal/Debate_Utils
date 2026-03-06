@@ -196,9 +196,10 @@ function attachSheetView() {
   // browser" block. With persistence, users sign in once and stay signed in.
   sheetView = new WebContentsView({
     webPreferences: {
-      contextIsolation: true,
-      nodeIntegration:  false,
-      partition:        'persist:flowkit-sheets',
+      contextIsolation:      true,
+      nodeIntegration:       false,
+      partition:             'persist:flowkit-sheets',
+      backgroundThrottling:  false,  // prevent Chromium throttling the sheet renderer when not focused
     },
   });
 
@@ -653,6 +654,14 @@ ipcMain.handle('sheet:addTab', async (_e, { spreadsheetId, tabName, format }) =>
 
 
 // ── App lifecycle ─────────────────────────────────────────────────────────────
+
+// These must be set before app.whenReady() fires.
+// They prevent Chromium from throttling background renderers and help the GPU
+// process start faster on macOS (Metal backend, no block-list early-out).
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
 
 app.whenReady().then(async () => {
   await initAuth();
