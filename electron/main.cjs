@@ -215,13 +215,30 @@ function attachSheetView() {
 
   // Google rejects Electron's default user agent (it contains "Electron/x.x.x")
   // on the first auth redirect and shows "unable to do so at this time".
-  // Setting a current Chrome UA lets Google Sheets' login flow complete normally.
-  // Keep the version reasonably current — an old Chrome version also triggers
-  // Google's browser checks.
-  sheetView.webContents.setUserAgent(
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
-    'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-    'Chrome/133.0.0.0 Safari/537.36'
+  // UA must match the actual OS platform — a mismatch between the UA string and
+  // the sec-ch-ua-platform header (which reflects the real OS) is itself a
+  // detection signal that Google uses to identify embedded browsers.
+  const CHROME_VERSION = '133.0.0.0';
+  const platformUA = process.platform === 'win32'
+    ? `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`
+    : `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`;
+  sheetView.webContents.setUserAgent(platformUA);
+
+  // Patch sec-ch-ua headers on requests to accounts.google.com so they match
+  // the spoofed UA above. Without this, Chromium sends its real build hints
+  // (e.g. "Chromium";v="130") while the UA string claims Chrome 133 — the
+  // inconsistency is an easy embedded-browser fingerprint.
+  const secChUa = `"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"`;
+  const secChUaPlatform = process.platform === 'win32' ? '"Windows"' : '"macOS"';
+  sheetView.webContents.session.webRequest.onBeforeSendHeaders(
+    { urls: ['https://accounts.google.com/*', 'https://docs.google.com/*'] },
+    (details, callback) => {
+      const headers = { ...details.requestHeaders };
+      headers['sec-ch-ua']          = secChUa;
+      headers['sec-ch-ua-mobile']   = '?0';
+      headers['sec-ch-ua-platform'] = secChUaPlatform;
+      callback({ requestHeaders: headers });
+    }
   );
 
   // If Google's CEF detection triggers ("Sign in with a supported browser"),
@@ -662,6 +679,8 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
+// Remove navigator.webdriver=true — Google's primary signal for detecting embedded browsers.
+app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 
 app.whenReady().then(async () => {
   await initAuth();
