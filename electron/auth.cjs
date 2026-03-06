@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const http = require('http');
 const { shell } = require('electron');
 
-const REDIRECT_PORT = 9876;
+const REDIRECT_PORT = 42813;
 const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/oauth2callback`;
 
 const SCOPES = [

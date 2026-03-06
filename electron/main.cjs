@@ -424,8 +424,10 @@ ipcMain.handle('auth:start', async () => {
 
   const result = { loggedIn: true, userInfo };
 
-  // Notify any open windows (e.g. if auth was triggered from outside Launcher)
+  // Bring the app back to the foreground after the system browser handled OAuth
   if (mainWindow) {
+    mainWindow.show();
+    mainWindow.focus();
     mainWindow.webContents.send('auth:complete', result);
   }
 
