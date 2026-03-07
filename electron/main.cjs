@@ -119,6 +119,50 @@ function sheetViewBounds() {
   };
 }
 
+// ── Sheet session seeder ─────────────────────────────────────────────────────
+//
+// After OAuth completes we have an access_token but the persist:flowkit-sheets
+// partition has no Google session cookies. Google's OAuthLogin endpoint converts
+// a valid access_token into real session cookies (SID, SSID, HSID, etc.) by
+// issuing them directly into whichever Chromium partition loads the URL.
+// A subsequent load of drive.google.com completes the session handshake so
+// docs.google.com requests find a valid logged-in session.
+//
+// tokeninfo?access_token=X does NOT do this — it is a JSON API endpoint and
+// issues no cookies. OAuthLogin is the correct mechanism.
+
+async function seedSheetViewSession(accessToken) {
+  if (!sheetView) return;
+
+  try {
+    // Step 1: OAuthLogin — Google issues real session cookies into this partition.
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 8000);
+      sheetView.webContents.once('did-finish-load', () => { clearTimeout(timer); resolve(); });
+      sheetView.webContents.loadURL(
+        `https://accounts.google.com/accounts/OAuthLogin` +
+        `?source=ChromiumBrowser&issueuberauth=1&sessionindex=0` +
+        `&access_token=${encodeURIComponent(accessToken)}`
+      );
+    });
+
+    // Step 2: Drive home — completes the session handshake so docs.google.com
+    // requests will find a valid session in this partition.
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 8000);
+      sheetView.webContents.once('did-finish-load', () => { clearTimeout(timer); resolve(); });
+      sheetView.webContents.loadURL('https://drive.google.com');
+    });
+  } catch (err) {
+    console.error('seedSheetViewSession: failed', err.message);
+  } finally {
+    // Move the view back off-screen — user hasn't opened a sheet yet.
+    if (!sheetActive && sheetView) {
+      sheetView.setBounds(sheetViewBounds());
+    }
+  }
+}
+
 // ── Auth bootstrap ───────────────────────────────────────────────────────────
 
 async function initAuth() {
@@ -137,14 +181,10 @@ async function initAuth() {
     });
 
     // sheetView doesn't exist yet — it's created inside createWindow().
-    // Schedule the warm-up for after the first BrowserWindow is ready so the
-    // persist:flowkit-sheets partition gets real Google session cookies on startup.
+    // mainWindow is also null here (initAuth runs before createWindow).
+    // Wait for the first BrowserWindow, then give sheetView time to attach.
     app.once('browser-window-created', () => {
-      setTimeout(() => {
-        if (sheetView && !sheetActive) {
-          sheetView.webContents.loadURL('https://sheets.google.com');
-        }
-      }, 1500);
+      setTimeout(() => seedSheetViewSession(tokens.access_token), 1000);
     });
   } catch (err) {
     console.error('initAuth: failed to restore session', err);
@@ -451,16 +491,10 @@ ipcMain.handle('auth:start', async () => {
     await setTokens({ ...existing, ...newTokens });
   });
 
-  // Warm up the sheetView session so Google's auth cookies land in the
-  // persist:flowkit-sheets partition before the user opens a sheet.
-  // Without this, the first sheet load sees no session and triggers Google's
-  // "Sign in with a supported browser" CEF block.
-  if (sheetView) {
-    sheetView.webContents.loadURL('https://sheets.google.com');
-    sheetView.webContents.once('did-finish-load', () => {
-      if (!sheetActive) sheetView.setBounds(sheetViewBounds());
-    });
-  }
+  // Seed real Google session cookies into the sheetView partition so the first
+  // sheet open finds a valid logged-in session and Google doesn't block the
+  // embedded sign-in with "Sign in with a supported browser".
+  await seedSheetViewSession(tokens.access_token);
 
   const result = { loggedIn: true, userInfo };
 
