@@ -135,6 +135,17 @@ async function initAuth() {
       const existing = await getTokens();
       await setTokens({ ...existing, ...newTokens });
     });
+
+    // sheetView doesn't exist yet — it's created inside createWindow().
+    // Schedule the warm-up for after the first BrowserWindow is ready so the
+    // persist:flowkit-sheets partition gets real Google session cookies on startup.
+    app.once('browser-window-created', () => {
+      setTimeout(() => {
+        if (sheetView && !sheetActive) {
+          sheetView.webContents.loadURL('https://sheets.google.com');
+        }
+      }, 1500);
+    });
   } catch (err) {
     console.error('initAuth: failed to restore session', err);
     oauth2Client = null;
@@ -439,6 +450,17 @@ ipcMain.handle('auth:start', async () => {
     const existing = await getTokens();
     await setTokens({ ...existing, ...newTokens });
   });
+
+  // Warm up the sheetView session so Google's auth cookies land in the
+  // persist:flowkit-sheets partition before the user opens a sheet.
+  // Without this, the first sheet load sees no session and triggers Google's
+  // "Sign in with a supported browser" CEF block.
+  if (sheetView) {
+    sheetView.webContents.loadURL('https://sheets.google.com');
+    sheetView.webContents.once('did-finish-load', () => {
+      if (!sheetActive) sheetView.setBounds(sheetViewBounds());
+    });
+  }
 
   const result = { loggedIn: true, userInfo };
 
