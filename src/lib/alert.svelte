@@ -17,7 +17,7 @@
 <style>
   .toast-strip {
     position: fixed;
-    top: 46px; /* sits flush below the toolbar */
+    top: var(--toolbar-h, 72px); /* sits flush below the toolbar */
     left: 0;
     right: 0;
     height: 28px;

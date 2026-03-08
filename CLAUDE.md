@@ -395,3 +395,32 @@ Limitations: polling is too slow for real-time use. Cell value polling via Sheet
 5. Implement the chosen injection strategy (clipboard or API)
 6. Wire up the speech selector to the column map for API-targeted writes
 
+The New Architecture
+Chrome Extension
+├── manifest.json          ← declares permissions, sidebar, service worker
+├── service-worker.js      ← replaces electron/main.cjs
+│   ├── .docx parsing (mammoth.js)
+│   ├── block cache (chrome.storage.local)
+│   ├── Drive API calls
+│   └── chrome.identity OAuth
+├── sidebar/               ← replaces all Svelte UI
+│   ├── Sidebar.svelte     ← main panel (block search, tub loader)
+│   ├── BlockPanel.svelte  ← reuse almost entirely
+│   └── Launcher.svelte    ← reuse with minor changes
+├── content-script.js      ← injects blocks into active Sheets cell
+└── icons/
+
+Monetization for a Chrome Extension
+Three clean options:
+Chrome Web Store payments — built in, Google takes 5%. Simplest but limited to one-time purchases, no subscriptions natively.
+Lemon Squeezy license key — user pays on your site, gets a key, enters it in the extension on first use. Extension validates against Lemon Squeezy API. Gives teammates free access by giving them a key you generate manually. This is probably your best option.
+Free tier / paid tier split — free users get 1 tub loaded, paid users get unlimited. Enforced in the extension logic checking license status.
+For giving teammates free access specifically — Lemon Squeezy lets you generate license keys manually at no charge. You generate keys for your team, they enter them, they're in. Everyone else pays $30 for a key.
+
+How to Start the Migration
+Give Claude Code this prompt to kick off the new project:
+
+"."
+
+Then work through the same session order as before — get the sidebar rendering first, then OAuth, then .docx parsing, then block injection into the sheet DOM.
+The block injection will actually be cleaner than the Electron clipboard hack — you can use a content script to find the active Sheets cell and set its value directly via the Sheets DOM or the API.

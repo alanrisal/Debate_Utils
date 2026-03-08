@@ -196,11 +196,8 @@
   }
 
   .home {
-    position: fixed;
-    top: 46px;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    flex: 1;
+    min-height: 0;
     background: #0a0a0a;
     display: flex;
     flex-direction: column;

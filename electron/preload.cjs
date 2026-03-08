@@ -138,4 +138,26 @@ contextBridge.exposeInMainWorld('flowkit', {
     ipcRenderer.on('auth:cef-blocked', handler);
     return () => ipcRenderer.off('auth:cef-blocked', handler);
   },
+
+  // ── Chrome auth bridge ────────────────────────────────────────────────────
+  // Trigger the Chrome CDP auth bridge: launches Chrome (if needed), waits
+  // for the user to sign into Google, extracts cookies, injects into session.
+  // Returns { success, injected, requiresSignIn, error? }
+  triggerChromeSignIn: () => ipcRenderer.invoke('auth:chrome-signin'),
+
+  // Main → Renderer: Chrome sign-in flow has started (Chrome window opened).
+  // Use this to show a "Waiting for sign-in…" indicator in the UI.
+  onChromeSigningIn: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on('auth:chrome-signing-in', handler);
+    return () => ipcRenderer.off('auth:chrome-signing-in', handler);
+  },
+
+  // Main → Renderer: Chrome sign-in flow completed (success or failure).
+  // cb receives { success, injected, requiresSignIn, error? }
+  onChromeSignInComplete: (cb) => {
+    const handler = (_e, result) => cb(result);
+    ipcRenderer.on('auth:chrome-complete', handler);
+    return () => ipcRenderer.off('auth:chrome-complete', handler);
+  },
 });

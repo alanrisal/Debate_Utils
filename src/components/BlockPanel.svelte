@@ -2,8 +2,44 @@
   import { onMount } from 'svelte';
   import { blocks, activeTubId, loadTub } from '../stores/blockIndex.js';
   import { search } from '../lib/search.js';
+  import { targetCell } from '../stores/targetCell.js';
 
   const isMac = typeof window !== 'undefined' && window.flowkit?.platform === 'darwin';
+
+  // ── Cell navigation math ───────────────────────────────────────────────────
+  // Convert column letters to/from 1-based index (A=1, Z=26, AA=27 …)
+  function colToNum(col) {
+    let n = 0;
+    for (const c of col.toUpperCase()) n = n * 26 + (c.charCodeAt(0) - 64);
+    return n;
+  }
+  function numToCol(n) {
+    let col = '';
+    while (n > 0) { n--; col = String.fromCharCode(65 + (n % 26)) + col; n = Math.floor(n / 26); }
+    return col;
+  }
+
+  // Return a new A1 cell reference shifted one step in the given arrow direction.
+  function shiftCell(cell, direction) {
+    const m = cell?.match(/^([A-Z]+)(\d+)$/i);
+    if (!m) return cell;
+    let colNum = colToNum(m[1]);
+    let row    = parseInt(m[2], 10);
+    if (direction === 'ArrowDown')  row++;
+    if (direction === 'ArrowUp')    row    = Math.max(1, row - 1);
+    if (direction === 'ArrowRight') colNum++;
+    if (direction === 'ArrowLeft')  colNum = Math.max(1, colNum - 1);
+    return `${numToCol(colNum)}${row}`;
+  }
+
+  // Move the target cell one step and tell the service worker to update the highlight.
+  function moveTargetCell(direction) {
+    const cur = $targetCell;
+    if (!cur.cell || !cur.spreadsheetId) return;
+    const newCell = shiftCell(cur.cell, direction);
+    targetCell.set({ ...cur, cell: newCell });
+    window.flowkit?.setTargetCell({ cell: newCell, gid: cur.gid, spreadsheetId: cur.spreadsheetId });
+  }
 
   // ── Tub registry ──────────────────────────────────────────────────────────
   let tubs        = [];
@@ -43,18 +79,36 @@
   $: if (results) selectedIdx = 0;  // reset on every new result set
 
   // ── Injection ─────────────────────────────────────────────────────────────
-  let injecting  = false;
-  let flashId    = null;   // id of the block that just injected (for flash)
+  let injecting   = false;
+  let flashId     = null;   // id of the block that just injected (for flash)
+  let injectError = '';     // shown below the search row on failure
 
   async function inject(block) {
-    if (!block || injecting || !window.flowkit?.injectBlock) return;
-    injecting = true;
-    flashId   = block.id;
+    if (!block || injecting) return;
+    injecting   = true;
+    injectError = '';
+
     try {
+      // Write block content directly to the selected cell via the Sheets REST API.
+      // The service worker holds the active cell reference (tracked by the content
+      // script) and handles the authenticated API call. No clipboard or DOM paste
+      // involved — Google Sheets blocks those approaches via canvas rendering.
       await window.flowkit.injectBlock(block.content);
-      // Clear search so user is ready for the next argument immediately.
+
+      // Flash the injected block and reset search ready for the next query.
+      flashId     = block.id;
       query       = '';
       selectedIdx = 0;
+
+      // Transfer keyboard focus from the side panel to the Sheets tab.
+      //
+      // Step 1: blur the search input and the side panel window itself.
+      // blur() on the element removes element-level focus; window.blur()
+      // signals to Chrome that this frame is relinquishing OS focus.
+    
+
+    } catch (e) {
+      injectError = e.message || 'injection failed';
     } finally {
       injecting = false;
       setTimeout(() => { flashId = null; }, 500);
@@ -62,8 +116,34 @@
   }
 
   // ── Keyboard handling (on the search input) ───────────────────────────────
+  //
+  // Two modes depending on whether the user is actively searching:
+  //
+  //   Navigation mode (query is empty):
+  //     ↑ ↓ ← →  move the highlighted target cell in the sheet
+  //     Enter     nothing (no block selected)
+  //
+  //   Search mode (query is non-empty):
+  //     ↑ ↓       scroll through block results
+  //     1–5       inject nth result directly
+  //     Enter     inject the currently highlighted result
+  //     Escape    clear query → back to navigation mode
+  //
+  // Typing any character naturally switches from navigation to search mode
+  // because it adds to the query, making query non-empty.
+  // After inject, query is cleared → back to navigation mode automatically.
   function onKeydown(e) {
-    // 1–5: inject the nth visible result without adding the digit to the input
+    const arrowKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+
+    // ── Navigation mode: no query typed yet ─────────────────────────────────
+    if (!query.trim() && arrowKeys.includes(e.key)) {
+      e.preventDefault();
+      moveTargetCell(e.key);
+      return;
+    }
+
+    // ── Search mode: query is active ─────────────────────────────────────────
+    // 1–5: inject the nth visible result without adding the digit to the input.
     const n = parseInt(e.key);
     if (n >= 1 && n <= 5 && results[n - 1]) {
       e.preventDefault();
@@ -98,6 +178,9 @@
     return 'score-lo';
   }
 </script>
+
+<!-- Full-width block panel — fills the content area in App.svelte -->
+<div class="block-panel">
 
 <!-- ── Tub selector header ─────────────────────────────────────────────────── -->
 <div class="header">
@@ -141,6 +224,11 @@
     autocomplete="off"
   />
 </div>
+
+<!-- ── Injection error ─────────────────────────────────────────────────────── -->
+{#if injectError}
+  <div class="inject-error">{injectError}</div>
+{/if}
 
 <!-- ── Results list ────────────────────────────────────────────────────────── -->
 <div class="results-wrap">
@@ -186,18 +274,27 @@
 
 <!-- ── Footer ─────────────────────────────────────────────────────────────── -->
 <div class="footer">
-  <span>1–5 inject</span>
-  <span class="sep">·</span>
-  <span>↑↓ navigate</span>
-  <span class="sep">·</span>
-  <span>esc clear</span>
-  <span class="sep">·</span>
-  <span>{isMac ? 'cmd+k' : 'ctrl+k'} close</span>
+  {#if query.trim()}
+    <span>↑↓ navigate</span>
+    <span class="sep">·</span>
+    <span>1–5 inject</span>
+    <span class="sep">·</span>
+    <span>esc clear</span>
+  {:else}
+    <span>↑↓←→ move cell</span>
+    <span class="sep">·</span>
+    <span>type to search</span>
+    <span class="sep">·</span>
+    <span>{isMac ? 'cmd+.' : 'ctrl+.'} focus</span>
+  {/if}
 </div>
 
+</div><!-- end .block-panel -->
+
 <style>
-  /* The panel itself is positioned by App.svelte; we just fill it. */
-  :global(.panel) {
+  .block-panel {
+    flex: 1;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -277,6 +374,16 @@
     font-size: 10px;
   }
   .search-input:disabled { cursor: default; }
+
+  /* ── Injection error ─────────────────────────────────────────────────── */
+  .inject-error {
+    padding: 4px 10px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 9px;
+    color: #cc4444;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
 
   /* ── Results ──────────────────────────────────────────────────────────── */
   .results-wrap {

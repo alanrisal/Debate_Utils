@@ -1,16 +1,71 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, globalShortcut, WebContentsView, dialog, clipboard } = require('electron');
-const path = require('path');
-const fs   = require('fs');
+/**
+ * main.cjs — FlowKit Electron Main Process
+ *
+ * HYBRID CHROME+ELECTRON ARCHITECTURE
+ * ─────────────────────────────────────
+ * FlowKit uses a two-layer approach to avoid Google's CEF (Chromium Embedded
+ * Framework) detection that blocks sign-in in Electron WebContentsViews:
+ *
+ *   Layer 1 — Electron BrowserWindow (Svelte UI)
+ *     The toolbar, launcher, and block panel live here.  These are always on
+ *     top of the sheet area and receive all pointer / keyboard events for the
+ *     FlowKit chrome.
+ *
+ *   Layer 2 — WebContentsView (Google Sheets renderer)
+ *     The embedded sheet lives in a WebContentsView that is sized to fill
+ *     the non-chrome area of the window.  UA spoofing + disabling Chromium's
+ *     AutomationControlled feature flag make the view look like plain Chrome.
+ *
+ *   Auth bridge — chrome-bridge.cjs (CDP)
+ *     On first launch (or after session expiry) we spawn real Chrome with a
+ *     FlowKit-dedicated profile and a remote-debugging-port.  We use CDP's
+ *     Network.getCookies to pull the user's Google session cookies from Chrome
+ *     and inject them into the persist:flowkit-sheets Electron session via
+ *     session.cookies.set().  After injection the WebContentsView already has
+ *     a valid Google session and loads Sheets without any sign-in prompt.
+ *
+ *     The fragile OAuthLogin cookie-seeding hack has been removed.  It was
+ *     calling accounts.google.com/accounts/OAuthLogin to convert an access_token
+ *     into session cookies — an endpoint Google has been progressively restricting.
+ *     The CDP approach uses real Chrome and is not subject to that restriction.
+ *
+ * BLOCK INJECTION
+ * ────────────────
+ *   Strategy A (edit mode): When a Sheets cell is in edit mode, Sheets
+ *     creates a <div contenteditable="true"> element.  We try to inject
+ *     directly via executeJavaScript + document.execCommand('insertText').
+ *     Zero clipboard impact.
+ *
+ *   Strategy B (cell selected): Clipboard TSV + simulated Ctrl+V.  Google
+ *     Sheets treats a double-quoted TSV field containing \n as in-cell line
+ *     breaks, keeping long block content in a single cell.
+ *
+ * MULTI-USER COLLABORATION
+ * ─────────────────────────
+ *   Real-time collaboration works out-of-the-box because the sheet runs in
+ *   Google's own infrastructure.  FlowKit only calls the Sheets/Drive REST API
+ *   for metadata operations (create sheet, add tab, set formatting, get title).
+ *   All live editing — including concurrent edits by multiple users — is handled
+ *   by Google's WebSocket-based OT engine inside the embedded sheet.  We never
+ *   read or write cell values through the API during an active session, so there
+ *   is no risk of API quota exhaustion or write conflicts.
+ */
+
+const { app, BrowserWindow, ipcMain, globalShortcut,
+        WebContentsView, dialog, clipboard } = require('electron');
+const path       = require('path');
+const fs         = require('fs');
 const { randomUUID } = require('crypto');
 
+// ── Environment ───────────────────────────────────────────────────────────────
 // Load .env before anything that reads process.env.
-// In a packaged app, .env lives in process.resourcesPath (bundled via extraResources).
-// In development, it lives next to package.json (one level above electron/).
+// Packaged app: .env lives in process.resourcesPath (bundled via extraResources).
+// Development: .env lives next to package.json (one level above electron/).
 const ENV_PATHS = [
-  path.join(process.resourcesPath ?? '', '.env'), // packaged
-  path.join(__dirname, '../.env'),                 // development
+  path.join(process.resourcesPath ?? '', '.env'),
+  path.join(__dirname, '../.env'),
 ];
 for (const envPath of ENV_PATHS) {
   try {
@@ -19,7 +74,7 @@ for (const envPath of ENV_PATHS) {
       const m = line.match(/^\s*([^#=\s][^=]*?)\s*=\s*(.*?)\s*$/);
       if (m) process.env[m[1]] = m[2];
     }
-    break; // stop at the first .env that loads successfully
+    break;
   } catch { /* try next path */ }
 }
 
@@ -33,40 +88,36 @@ const { listFolder, listSharedWithMe, listSharedDrives,
         searchSheets, fixSheetWrapping, getSheetTitle } = require('./sheets-api.cjs');
 const { parseTub } = require('./parser.cjs');
 
-// ── Constants ────────────────────────────────────────────────────────────────
+// Chrome auth bridge — handles CDP-based cookie extraction from real Chrome.
+// This replaces the fragile OAuthLogin cookie-seeding approach.
+const { seedSession: chromeSeedSession, killChrome, findChrome } = require('./chrome-bridge.cjs');
+
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 const PANEL_WIDTH    = 300;  // px — matches BlockPanel.svelte width
 const TOOLBAR_HEIGHT = 46;   // px — matches Toolbar.svelte height
-const TOAST_HEIGHT   = 28;   // px — thin strip below toolbar for toast notifications
+const TOAST_HEIGHT   = 28;   // px — thin strip below toolbar for toasts
 
-// ── State ────────────────────────────────────────────────────────────────────
+// ── State ─────────────────────────────────────────────────────────────────────
 
 let mainWindow      = null;
 let sheetView       = null;
 let panelOpen       = false;
-let launcherIsOpen  = false;   // Drive launcher overlay is open
-let paletteIsOpen   = false;   // command palette dropdown is open
-let sheetActive     = false;   // a sheet URL has been loaded (off = home screen)
-let toastVisible    = false;   // toast notification is visible — leave gap at bottom
+let launcherIsOpen  = false;
+let paletteIsOpen   = false;
+let sheetActive     = false;
+let toastVisible    = false;
 let oauth2Client    = null;
 let currentUserInfo = null;
-let currentSheetUrl = '';      // last URL loaded in the sheet view
+let currentSheetUrl = '';
 
-// Tracks spreadsheetIds that have had WRAP applied this session so we don't
-// repeat the batchUpdate every time the user navigates back to the same sheet.
+// Tracks spreadsheetIds that have had WRAP applied this session.
 const wrappingFixedIds = new Set();
 
-// ── Tub cache helpers ─────────────────────────────────────────────────────────
-// Parsed .docx tubs are serialized as JSON next to the userData dir so the
-// app never re-parses a file it has already seen. Cache is keyed by tub ID.
+// ── Tub cache ─────────────────────────────────────────────────────────────────
 
-function tubCacheDir() {
-  return path.join(app.getPath('userData'), 'tub-cache');
-}
-
-function tubCachePath(tubId) {
-  return path.join(tubCacheDir(), `${tubId}.json`);
-}
+function tubCacheDir()        { return path.join(app.getPath('userData'), 'tub-cache'); }
+function tubCachePath(tubId)  { return path.join(tubCacheDir(), `${tubId}.json`); }
 
 async function ensureTubParsed(tub) {
   const cachePath = tubCachePath(tub.id);
@@ -79,11 +130,8 @@ async function ensureTubParsed(tub) {
   return blocks;
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-// Convert a raw API / Gaxios error into a clean user-facing message.
-// Throwing this keeps Electron's "Error occurred in handler" log clean
-// and ensures the renderer catch block gets a readable string.
 function friendlyError(e) {
   const raw = (e?.message || e?.toString() || 'unknown error').toLowerCase();
   if (raw.includes('not supported for this document'))
@@ -98,16 +146,15 @@ function friendlyError(e) {
     return new Error('google api rate limit hit — try again in a moment');
   if (raw.includes('network') || raw.includes('enotfound') || raw.includes('econnrefused'))
     return new Error('network error — check your internet connection');
-  // Fall back to the original message, stripped of any stack/gaxios boilerplate
   const clean = (e?.message || 'unexpected error').split('\n')[0].trim();
   return new Error(clean);
 }
 
 function sheetViewBounds() {
   const [w, h] = mainWindow.getContentSize();
-  // Move the native WebContentsView completely off-screen whenever any Svelte
-  // overlay needs to be visible and clickable (home screen, launcher, palette).
   if (!sheetActive || launcherIsOpen || paletteIsOpen) {
+    // Move the native WebContentsView completely off-screen whenever any Svelte
+    // overlay needs to be visible and clickable (home screen, launcher, palette).
     return { x: 0, y: h + TOOLBAR_HEIGHT, width: w, height: h - TOOLBAR_HEIGHT };
   }
   const topOffset = TOOLBAR_HEIGHT + (toastVisible ? TOAST_HEIGHT : 0);
@@ -119,81 +166,75 @@ function sheetViewBounds() {
   };
 }
 
-// ── Sheet session seeder ─────────────────────────────────────────────────────
+// ── Chrome auth bridge ────────────────────────────────────────────────────────
 //
-// After OAuth completes we have an access_token but the persist:flowkit-sheets
-// partition has no Google session cookies. Google's OAuthLogin endpoint converts
-// a valid access_token into real session cookies (SID, SSID, HSID, etc.) by
-// issuing them directly into whichever Chromium partition loads the URL.
-// A subsequent load of drive.google.com completes the session handshake so
-// docs.google.com requests find a valid logged-in session.
+// Replaces the removed seedSheetViewSession() that used the OAuthLogin endpoint.
 //
-// tokeninfo?access_token=X does NOT do this — it is a JSON API endpoint and
-// issues no cookies. OAuthLogin is the correct mechanism.
+// initChromeAuth() is called:
+//   1. At startup (initAuth) — silently, only succeeds if Chrome is already
+//      running with CDP on our port (i.e. from a previous session).
+//   2. After OAuth completes (auth:start handler) — not silent; will launch
+//      Chrome and wait for sign-in if needed.
+//   3. On-demand via 'auth:chrome-signin' IPC — user explicitly triggers it.
+//
+// The sheetView may not exist yet when initChromeAuth is called at startup.
+// The caller must pass the session explicitly.
 
-async function seedSheetViewSession(accessToken) {
-  if (!sheetView) return;
-
+async function initChromeAuth(electronSession, { silent = false } = {}) {
+  if (!electronSession) return;
   try {
-    // Step 1: OAuthLogin — Google issues real session cookies into this partition.
-    await new Promise((resolve) => {
-      const timer = setTimeout(resolve, 8000);
-      sheetView.webContents.once('did-finish-load', () => { clearTimeout(timer); resolve(); });
-      sheetView.webContents.loadURL(
-        `https://accounts.google.com/accounts/OAuthLogin` +
-        `?source=ChromiumBrowser&issueuberauth=1&sessionindex=0` +
-        `&access_token=${encodeURIComponent(accessToken)}`
-      );
-    });
-
-    // Step 2: Drive home — completes the session handshake so docs.google.com
-    // requests will find a valid session in this partition.
-    await new Promise((resolve) => {
-      const timer = setTimeout(resolve, 8000);
-      sheetView.webContents.once('did-finish-load', () => { clearTimeout(timer); resolve(); });
-      sheetView.webContents.loadURL('https://drive.google.com');
-    });
-  } catch (err) {
-    console.error('seedSheetViewSession: failed', err.message);
-  } finally {
-    // Move the view back off-screen — user hasn't opened a sheet yet.
-    if (!sheetActive && sheetView) {
-      sheetView.setBounds(sheetViewBounds());
+    const result = await chromeSeedSession(electronSession, { silent });
+    if (result.success) {
+      console.log(`[main] Chrome auth bridge seeded ${result.injected} cookies (requiresSignIn=${result.requiresSignIn})`);
+    } else if (result.error) {
+      console.warn('[main] Chrome auth bridge did not seed session:', result.error);
     }
+    return result;
+  } catch (err) {
+    console.error('[main] initChromeAuth failed:', err.message);
+    return { success: false, injected: 0, requiresSignIn: false };
   }
 }
 
-// ── Auth bootstrap ───────────────────────────────────────────────────────────
+// ── Auth bootstrap ────────────────────────────────────────────────────────────
 
 async function initAuth() {
   const tokens = await getTokens();
   if (!tokens) return;
 
   try {
-    const userInfo = await getUserInfo();
-    oauth2Client = buildClientFromTokens(tokens);
-    currentUserInfo = userInfo;
+    const userInfo    = await getUserInfo();
+    oauth2Client      = buildClientFromTokens(tokens);
+    currentUserInfo   = userInfo;
 
-    // Save refreshed tokens automatically when googleapis rotates them
+    // Automatically persist refreshed tokens when googleapis rotates them.
     oauth2Client.on('tokens', async (newTokens) => {
       const existing = await getTokens();
       await setTokens({ ...existing, ...newTokens });
     });
 
-    // sheetView doesn't exist yet — it's created inside createWindow().
-    // mainWindow is also null here (initAuth runs before createWindow).
-    // Wait for the first BrowserWindow, then give sheetView time to attach.
+    // sheetView is created inside createWindow() → attachSheetView(), which
+    // runs after initAuth().  Wait for the window to open, then give the
+    // WebContentsView a moment to attach before attempting cookie injection.
     app.once('browser-window-created', () => {
-      setTimeout(() => seedSheetViewSession(tokens.access_token), 1000);
+      setTimeout(async () => {
+        if (!sheetView) return;
+        // Silent mode: only succeeds if Chrome is already running on the CDP
+        // port from a previous session.  This is a best-effort fast path.
+        // Full auth (with Chrome launch) only runs when the user opens a sheet
+        // and gets a CEF-blocked redirect, or when they explicitly sign in via
+        // the auth:chrome-signin IPC handler.
+        await initChromeAuth(sheetView.webContents.session, { silent: true });
+      }, 1000);
     });
   } catch (err) {
     console.error('initAuth: failed to restore session', err);
-    oauth2Client = null;
+    oauth2Client    = null;
     currentUserInfo = null;
   }
 }
 
-// ── Window ───────────────────────────────────────────────────────────────────
+// ── Window ────────────────────────────────────────────────────────────────────
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -203,9 +244,6 @@ function createWindow() {
     minHeight: 600,
     show: false,
     titleBarStyle: 'hidden',
-    // Position the macOS traffic lights so they sit inside the 46px toolbar
-    // without overlapping toolbar content. x:14 aligns them with the left
-    // padding; y:15 centres the 16px buttons in the 46px bar ((46-16)/2=15).
     trafficLightPosition: { x: 14, y: 15 },
     webPreferences: {
       preload:          path.join(__dirname, 'preload.cjs'),
@@ -214,7 +252,6 @@ function createWindow() {
     },
   });
 
-  // Dev: Vite dev server. Prod: built index.html.
   if (!app.isPackaged) {
     mainWindow.loadURL('http://localhost:5173');
   } else {
@@ -226,7 +263,6 @@ function createWindow() {
     attachSheetView();
   });
 
-  // Keep the sheet view sized to the window.
   mainWindow.on('resize', () => {
     if (sheetView) sheetView.setBounds(sheetViewBounds());
   });
@@ -237,150 +273,133 @@ function createWindow() {
   });
 }
 
-// ── Sheet BrowserView (WebContentsView) ──────────────────────────────────────
+// ── WebContentsView (Google Sheets renderer) ──────────────────────────────────
 
 function attachSheetView() {
   // 'persist:flowkit-sheets' gives the WebContentsView its own cookie/storage
-  // partition that survives across app restarts. Without this, every cold open
-  // starts with zero Google session cookies and forces a full sign-in — which
-  // is when Google's CEF detection triggers the "Sign in with a supported
-  // browser" block. With persistence, users sign in once and stay signed in.
+  // partition that survives app restarts.  Real Google session cookies (injected
+  // via the Chrome auth bridge) live in this partition, so the sheet loads
+  // pre-authenticated on every subsequent launch.
   sheetView = new WebContentsView({
     webPreferences: {
-      contextIsolation:      true,
-      nodeIntegration:       false,
-      partition:             'persist:flowkit-sheets',
-      backgroundThrottling:  false,  // prevent Chromium throttling the sheet renderer when not focused
+      contextIsolation:     true,
+      nodeIntegration:      false,
+      partition:            'persist:flowkit-sheets',
+      backgroundThrottling: false,
     },
   });
 
   mainWindow.contentView.addChildView(sheetView);
   sheetView.setBounds(sheetViewBounds());
 
-  // Grant clipboard read/write permissions so Google Sheets' Edit-menu
-  // copy/cut/paste works without showing the "install Chrome extension" prompt.
+  // Grant clipboard permissions so Google Sheets' Edit-menu copy/paste works
+  // without the "install Chrome extension" prompt.
   sheetView.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
     const allowed = ['clipboard-read', 'clipboard-write', 'clipboard-sanitized-write'];
     callback(allowed.includes(permission));
   });
 
-  // Google rejects Electron's default user agent (it contains "Electron/x.x.x")
-  // on the first auth redirect and shows "unable to do so at this time".
-  // UA must match the actual OS platform — a mismatch between the UA string and
-  // the sec-ch-ua-platform header (which reflects the real OS) is itself a
-  // detection signal that Google uses to identify embedded browsers.
-  const CHROME_VERSION = '133.0.0.0';
+  // UA spoofing — match the actual Chromium version Electron ships with.
+  // process.versions.chrome is the real Chromium version string (e.g. "136.0.7103.48").
+  // Using the actual version eliminates the version-mismatch fingerprint that
+  // arose from the previously hardcoded '133.0.0.0'.
+  const CHROME_VERSION = process.versions.chrome || '136.0.0.0';
   const platformUA = process.platform === 'win32'
     ? `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`
     : `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`;
   sheetView.webContents.setUserAgent(platformUA);
 
-  // Patch sec-ch-ua headers on requests to accounts.google.com so they match
-  // the spoofed UA above. Without this, Chromium sends its real build hints
-  // (e.g. "Chromium";v="130") while the UA string claims Chrome 133 — the
-  // inconsistency is an easy embedded-browser fingerprint.
-  const secChUa = `"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"`;
-  const secChUaPlatform = process.platform === 'win32' ? '"Windows"' : '"macOS"';
+  // Patch sec-ch-ua client hint headers so they match the spoofed UA above.
+  // A mismatch between UA (claiming Chrome X) and sec-ch-ua (reporting
+  // Chromium Y) is a reliable embedded-browser fingerprint.
+  const majorVersion  = CHROME_VERSION.split('.')[0];
+  const secChUa       = `"Not(A:Brand";v="99", "Google Chrome";v="${majorVersion}", "Chromium";v="${majorVersion}"`;
+  const secChPlatform = process.platform === 'win32' ? '"Windows"' : '"macOS"';
+
   sheetView.webContents.session.webRequest.onBeforeSendHeaders(
     { urls: ['https://accounts.google.com/*', 'https://docs.google.com/*'] },
     (details, callback) => {
       const headers = { ...details.requestHeaders };
       headers['sec-ch-ua']          = secChUa;
       headers['sec-ch-ua-mobile']   = '?0';
-      headers['sec-ch-ua-platform'] = secChUaPlatform;
+      headers['sec-ch-ua-platform'] = secChPlatform;
       callback({ requestHeaders: headers });
     }
   );
 
-  // If Google's CEF detection triggers ("Sign in with a supported browser"),
-  // the page navigates to accounts.google.com with a rejection indicator.
-  // Intercept it and tell the renderer to show a recovery prompt instead of
-  // leaving the user stranded on a Google error page.
-  sheetView.webContents.on('did-navigate', (_event, url) => {
-    if (/accounts\.google\.com.*(signin\/rejected|unsupported_browser|nomatch)/i.test(url)) {
-      if (mainWindow) mainWindow.webContents.send('auth:cef-blocked');
+  // CEF detection handler — when Google redirects to the "Sign in with a
+  // supported browser" rejection page, we automatically attempt to recover
+  // by running the Chrome auth bridge (which injects real Google cookies)
+  // and then reloading the sheet.
+  sheetView.webContents.on('did-navigate', async (_event, url) => {
+    if (!/accounts\.google\.com.*(signin\/rejected|unsupported_browser|nomatch)/i.test(url)) return;
+
+    console.log('[main] CEF block detected — attempting Chrome auth bridge recovery...');
+    if (mainWindow) mainWindow.webContents.send('auth:cef-blocked');
+
+    // Auto-recover: seed cookies from Chrome, then reload the sheet.
+    const result = await initChromeAuth(sheetView.webContents.session, { silent: false });
+    if (result?.success && sheetActive && currentSheetUrl) {
+      sheetView.webContents.loadURL(currentSheetUrl);
+      if (mainWindow) mainWindow.webContents.send('auth:chrome-complete', { injected: result.injected });
     }
   });
 
   // Google Sheets registers a beforeunload handler that Electron surfaces as a
-  // native dialog. Without this listener, navigating to a different spreadsheet
-  // silently fails because the dialog is blocked and navigation is cancelled.
+  // native dialog.  Without this listener, navigating to a different spreadsheet
+  // silently fails.  Sheets auto-saves, so bypassing the dialog is safe.
   sheetView.webContents.on('will-prevent-unload', (event) => {
-    event.preventDefault(); // bypass — Google Sheets auto-saves, dialog is unnecessary
+    event.preventDefault();
   });
 
-  // Suppress Google's "the app is better" / "get the app" promotional banners.
-  // Google's compiled class names change frequently so CSS selectors are
-  // unreliable. Instead we inject a MutationObserver that scans text content
-  // and removes the element from the DOM entirely — bypassing the broken
-  // dismiss handlers (which fire app-store URL navigations that fail silently
-  // in Electron, leaving the dialog stuck open).
+  // Suppress Google's promotional banners ("Get the app", "Try the Chrome extension").
+  // Uses a MutationObserver scanning text content rather than fragile compiled
+  // class-name selectors, which change with every Google Sheets release.
   const SUPPRESS_SCRIPT = `(function () {
-    const PROMO_PHRASES = [
-      'get the app', 'app is better', 'switch to app',
-      'install the app', 'open in app', 'use the app',
-      'try the app', 'sheets app',
-      'chrome extension', 'install this google'
+    const PHRASES = [
+      'get the app','app is better','switch to app','install the app',
+      'open in app','use the app','try the app','sheets app',
+      'chrome extension','install this google'
     ];
-
     function isPromo(el) {
       if (!el || typeof el.textContent !== 'string') return false;
       const t = el.textContent.toLowerCase();
-      return PROMO_PHRASES.some(p => t.includes(p));
+      return PHRASES.some(p => t.includes(p));
     }
-
     function sweep() {
-      // Target fixed/sticky elements anywhere on the page — the banner is
-      // always position:fixed at the bottom. Also check common ARIA roles.
-      const candidates = document.querySelectorAll(
-        'body > *, [role="dialog"], [role="banner"], ' +
-        '[role="alertdialog"], [role="complementary"]'
-      );
-      candidates.forEach(el => {
+      document.querySelectorAll(
+        'body > *, [role="dialog"], [role="banner"], [role="alertdialog"], [role="complementary"]'
+      ).forEach(el => {
         try {
           const s = window.getComputedStyle(el);
-          if (s.position === 'fixed' || s.position === 'sticky') {
-            if (isPromo(el)) { el.remove(); }
-          }
+          if ((s.position === 'fixed' || s.position === 'sticky') && isPromo(el)) el.remove();
         } catch (_) {}
       });
     }
-
     sweep();
-
-    new MutationObserver(mutations => {
-      for (const m of mutations) {
-        m.addedNodes.forEach(node => {
-          if (node.nodeType === 1 && isPromo(node)) node.remove();
-        });
-      }
+    new MutationObserver(ms => {
+      for (const m of ms) m.addedNodes.forEach(n => { if (n.nodeType === 1 && isPromo(n)) n.remove(); });
     }).observe(document.documentElement, { childList: true, subtree: true });
   })();`;
 
   sheetView.webContents.on('did-finish-load', () => {
     sheetView.webContents.executeJavaScript(SUPPRESS_SCRIPT).catch(() => {});
   });
-
-  // Start blank — user opens a sheet via the toolbar URL bar or Drive launcher.
 }
 
-// ── IPC handlers ─────────────────────────────────────────────────────────────
+// ── IPC handlers ──────────────────────────────────────────────────────────────
 
-// Renderer tells main the panel opened or closed → resize the sheet view.
 ipcMain.on('panel:toggle', (_e, isOpen) => {
   panelOpen = Boolean(isOpen);
   if (sheetView) sheetView.setBounds(sheetViewBounds());
 });
 
-// Renderer requests a panel toggle (e.g. from the toolbar button).
-// Mirrors the Ctrl+K global shortcut logic.
 ipcMain.on('panel:toggle-request', () => {
   panelOpen = !panelOpen;
   if (sheetView) sheetView.setBounds(sheetViewBounds());
   if (mainWindow) mainWindow.webContents.send('panel:toggle', panelOpen);
 });
 
-// Renderer asks main to load a sheet URL — bring the view on-screen.
 ipcMain.on('sheet:open', (_e, url) => {
   const prevBase = currentSheetUrl.split('#')[0];
   const newBase  = url.split('#')[0];
@@ -393,22 +412,17 @@ ipcMain.on('sheet:open', (_e, url) => {
     sheetView.setBounds(sheetViewBounds());
 
     if (sheetActive && prevBase === newBase && newHash) {
-      // Same spreadsheet already loaded — hash-only navigation (no network round-trip).
-      // Safe because the Sheets client already knows every tab in this file.
+      // Same spreadsheet — hash-only navigation; no network round-trip.
       sheetView.webContents
         .executeJavaScript(`window.location.hash = '${newHash}'`)
-        .catch(() => sheetView.webContents.loadURL(url)); // fallback if JS context unavailable
+        .catch(() => sheetView.webContents.loadURL(url));
     } else {
-      // Different spreadsheet, first open, or no hash — full load required.
-      // Also handles first-time login: the Sheets page must load fresh so
-      // Google's auth cookies are processed and the user lands in the right account.
       sheetView.webContents.loadURL(url);
     }
   }
 
   // Silently apply WRAP to all tabs once per session per spreadsheet.
-  // Fixes existing sheets created before the WRAP-on-create change.
-  const idMatch = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  const idMatch       = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
   const spreadsheetId = idMatch?.[1];
   if (spreadsheetId && oauth2Client && !wrappingFixedIds.has(spreadsheetId)) {
     wrappingFixedIds.add(spreadsheetId);
@@ -416,7 +430,7 @@ ipcMain.on('sheet:open', (_e, url) => {
       .catch(e => console.error('fixSheetWrapping:', e.message));
   }
 
-  // Record in recents — fetch the sheet title from Drive, fall back to URL if unauthenticated.
+  // Record in recents.
   if (spreadsheetId) {
     (async () => {
       let name = 'untitled sheet';
@@ -428,35 +442,26 @@ ipcMain.on('sheet:open', (_e, url) => {
   }
 });
 
-// Renderer navigated back to home — push the sheet view off-screen so the
-// Home.svelte component (in the BrowserWindow layer) is visible and clickable.
 ipcMain.on('home:show', () => {
   sheetActive = false;
   if (sheetView) sheetView.setBounds(sheetViewBounds());
 });
 
-// Renderer tells main the Drive launcher opened or closed.
 ipcMain.on('launcher:toggle', (_e, isOpen) => {
   launcherIsOpen = Boolean(isOpen);
   if (sheetView) sheetView.setBounds(sheetViewBounds());
 });
 
-// Renderer tells main the command palette dropdown opened or closed.
-// The palette is a Svelte element in the BrowserWindow layer; the native
-// WebContentsView must be moved off-screen so the dropdown is clickable.
 ipcMain.on('palette:toggle', (_e, isOpen) => {
   paletteIsOpen = Boolean(isOpen);
   if (sheetView) sheetView.setBounds(sheetViewBounds());
 });
 
-// Renderer awaits this before rendering the toast strip, so the sheet bounds
-// are guaranteed updated before the Svelte component becomes visible.
 ipcMain.handle('toast:toggle', (_e, isVisible) => {
   toastVisible = Boolean(isVisible);
   if (sheetView) sheetView.setBounds(sheetViewBounds());
 });
 
-// Renderer close button.
 ipcMain.on('window:close', () => {
   if (mainWindow) mainWindow.close();
 });
@@ -466,15 +471,14 @@ ipcMain.on('window:close', () => {
 ipcMain.handle('recent:get', () => getRecentSheets());
 ipcMain.handle('recent:add', (_e, entry) => addRecentSheet(entry));
 
-// ── Auth / Drive IPC handlers ─────────────────────────────────────────────────
+// ── Auth / Drive IPC ──────────────────────────────────────────────────────────
 
-ipcMain.handle('auth:status', () => {
-  return {
-    loggedIn:       !!oauth2Client,
-    userInfo:       currentUserInfo,
-    hasCredentials: !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
-  };
-});
+ipcMain.handle('auth:status', () => ({
+  loggedIn:       !!oauth2Client,
+  userInfo:       currentUserInfo,
+  hasCredentials: !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
+  chromeAvailable: !!findChrome(),
+}));
 
 ipcMain.handle('auth:start', async () => {
   const { tokens, userInfo, client } = await startAuthFlow();
@@ -485,27 +489,31 @@ ipcMain.handle('auth:start', async () => {
   oauth2Client    = client;
   currentUserInfo = userInfo;
 
-  // Save refreshed tokens automatically
   oauth2Client.on('tokens', async (newTokens) => {
     const existing = await getTokens();
     await setTokens({ ...existing, ...newTokens });
   });
 
-  // Seed real Google session cookies into the sheetView partition so the first
-  // sheet open finds a valid logged-in session and Google doesn't block the
-  // embedded sign-in with "Sign in with a supported browser".
-  await seedSheetViewSession(tokens.access_token);
+  // Seed the WebContentsView session with real Google cookies from Chrome.
+  // This replaces the removed OAuthLogin cookie-seeding hack.
+  // If Chrome is not installed or the bridge fails, the user can still
+  // sign in manually via the sheet view's own Google sign-in flow.
+  if (sheetView) {
+    const result = await initChromeAuth(sheetView.webContents.session, { silent: false });
+    if (result?.success) {
+      console.log('[main] auth:start — Chrome bridge succeeded, sheet view pre-authenticated');
+    }
+  }
 
-  const result = { loggedIn: true, userInfo };
+  const authResult = { loggedIn: true, userInfo };
 
-  // Bring the app back to the foreground after the system browser handled OAuth
   if (mainWindow) {
     mainWindow.show();
     mainWindow.focus();
-    mainWindow.webContents.send('auth:complete', result);
+    mainWindow.webContents.send('auth:complete', authResult);
   }
 
-  return result;
+  return authResult;
 });
 
 ipcMain.handle('auth:logout', async () => {
@@ -515,44 +523,60 @@ ipcMain.handle('auth:logout', async () => {
   return { loggedIn: false };
 });
 
+// On-demand Chrome auth bridge — called when:
+//   • The renderer shows a "Sign in to Google Sheets" button
+//   • The user wants to refresh a stale session
+//   • The CEF block auto-recovery didn't succeed
+ipcMain.handle('auth:chrome-signin', async () => {
+  if (!sheetView) return { success: false, error: 'Sheet view not ready' };
+
+  if (mainWindow) mainWindow.webContents.send('auth:chrome-signing-in');
+
+  const result = await initChromeAuth(sheetView.webContents.session, { silent: false });
+
+  if (result?.success && sheetActive && currentSheetUrl) {
+    // Reload the current sheet so it picks up the freshly injected cookies.
+    sheetView.webContents.loadURL(currentSheetUrl);
+  }
+
+  if (mainWindow) mainWindow.webContents.send('auth:chrome-complete', result);
+  return result;
+});
+
+// ── Drive handlers ────────────────────────────────────────────────────────────
+
 ipcMain.handle('drive:listFolder', async (_e, folderId) => {
   if (!oauth2Client) throw new Error('not authenticated — please sign in again');
-  try {
-    return await listFolder(oauth2Client, folderId);
-  } catch (e) { throw friendlyError(e); }
+  try { return await listFolder(oauth2Client, folderId); }
+  catch (e) { throw friendlyError(e); }
 });
 
 ipcMain.handle('drive:listSharedWithMe', async () => {
   if (!oauth2Client) throw new Error('not authenticated — please sign in again');
-  try {
-    return await listSharedWithMe(oauth2Client);
-  } catch (e) { throw friendlyError(e); }
+  try { return await listSharedWithMe(oauth2Client); }
+  catch (e) { throw friendlyError(e); }
 });
 
 ipcMain.handle('drive:listSharedDrives', async () => {
   if (!oauth2Client) throw new Error('not authenticated — please sign in again');
-  try {
-    return await listSharedDrives(oauth2Client);
-  } catch (e) { throw friendlyError(e); }
+  try { return await listSharedDrives(oauth2Client); }
+  catch (e) { throw friendlyError(e); }
 });
 
 ipcMain.handle('drive:searchSheets', async (_e, query) => {
   if (!oauth2Client) throw new Error('not authenticated — please sign in again');
-  try {
-    return await searchSheets(oauth2Client, query);
-  } catch (e) { throw friendlyError(e); }
+  try { return await searchSheets(oauth2Client, query); }
+  catch (e) { throw friendlyError(e); }
 });
 
 // ── Template handlers ─────────────────────────────────────────────────────────
 
-ipcMain.handle('templates:get', async () => {
-  return getTemplates();
-});
+ipcMain.handle('templates:get', () => getTemplates());
 
 ipcMain.handle('templates:add', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-    title: 'Select Template (.xlsx)',
-    filters: [{ name: 'Excel Files', extensions: ['xlsx'] }],
+    title:      'Select Template (.xlsx)',
+    filters:    [{ name: 'Excel Files', extensions: ['xlsx'] }],
     properties: ['openFile'],
   });
   if (canceled || filePaths.length === 0) return null;
@@ -569,16 +593,14 @@ ipcMain.handle('templates:remove', async (_e, id) => {
   await saveTemplates(existing.filter(t => t.id !== id));
 });
 
-// ── Tubs (local .docx block files) handlers ───────────────────────────────────
+// ── Tubs handlers ─────────────────────────────────────────────────────────────
 
-ipcMain.handle('tubs:get', async () => {
-  return getTubs();
-});
+ipcMain.handle('tubs:get', () => getTubs());
 
 ipcMain.handle('tubs:add', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-    title: 'Select Block Files (.docx)',
-    filters: [{ name: 'Word Documents', extensions: ['docx'] }],
+    title:      'Select Block Files (.docx)',
+    filters:    [{ name: 'Word Documents', extensions: ['docx'] }],
     properties: ['openFile', 'multiSelections'],
   });
   if (canceled || filePaths.length === 0) return [];
@@ -589,7 +611,6 @@ ipcMain.handle('tubs:add', async () => {
     filePath: fp,
   }));
   await saveTubs([...existing, ...added]);
-  // Parse and cache each new tub immediately so it's ready when the panel opens.
   fs.mkdirSync(tubCacheDir(), { recursive: true });
   for (const tub of added) {
     try {
@@ -603,17 +624,14 @@ ipcMain.handle('tubs:add', async () => {
 });
 
 ipcMain.handle('tubs:remove', async (_e, id) => {
-  const existing = await getTubs();
+  const existing  = await getTubs();
   await saveTubs(existing.filter(t => t.id !== id));
-  // Clean up the JSON cache file.
   const cachePath = tubCachePath(id);
   if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath);
 });
 
-// ── Block parsing / injection handlers ───────────────────────────────────────
+// ── Block parse/inject handlers ───────────────────────────────────────────────
 
-// Called at app startup: ensures every registered tub has a JSON cache so
-// loading a tub in the panel is instant (no on-demand parse needed).
 ipcMain.handle('tubs:parseAll', async () => {
   const tubs = await getTubs();
   fs.mkdirSync(tubCacheDir(), { recursive: true });
@@ -629,7 +647,6 @@ ipcMain.handle('tubs:parseAll', async () => {
   return results;
 });
 
-// Return the cached block array for a single tub (parse on demand if missing).
 ipcMain.handle('tubs:getBlocks', async (_e, tubId) => {
   const tubs = await getTubs();
   const tub  = tubs.find(t => t.id === tubId);
@@ -637,19 +654,53 @@ ipcMain.handle('tubs:getBlocks', async (_e, tubId) => {
   return ensureTubParsed(tub);
 });
 
-// Write block content to the OS clipboard then simulate Ctrl+V into the sheet.
-//
-// Paste strategy: TSV quoting (RFC 4180).
-// Google Sheets parses plain-text clipboard as tab-separated values. In TSV,
-// wrapping a field in double-quotes lets it contain literal \n characters that
-// become in-cell line breaks instead of new rows. Internal " are escaped as "".
-//
-// U+2028 was tried previously and silently stripped by Sheets — do not use it.
+/**
+ * Block injection — two strategies:
+ *
+ * Strategy A — Direct JS injection (edit mode only)
+ *   When a Sheets cell is in edit mode (user pressed F2 or double-clicked),
+ *   Sheets creates a real <div contenteditable="true"> for text input.
+ *   We try to insert the block text directly via document.execCommand.
+ *   Zero clipboard impact, near-instant perceived latency.
+ *
+ * Strategy B — Clipboard TSV + simulated Ctrl+V (cell selected mode)
+ *   Wrapping the content in TSV double-quotes tells Sheets to treat embedded
+ *   newlines as in-cell line breaks rather than new rows.  Simulated Ctrl+V
+ *   pastes into whichever cell the user last clicked — cell-position agnostic.
+ */
 ipcMain.handle('blocks:inject', async (_e, content) => {
-  // Normalise line endings then apply TSV quoting.
+  if (sheetView) {
+    // Strategy A: JS injection into the contenteditable cell editor.
+    // JSON.stringify ensures content with any characters is safely embedded.
+    try {
+      const injected = await sheetView.webContents.executeJavaScript(`
+        (function (text) {
+          // Google Sheets exposes a contenteditable div in edit mode.
+          // We target it by role + contenteditable attribute — more stable than
+          // compiled class names (which change with every Sheets release).
+          const editor = document.querySelector(
+            '[contenteditable="true"][role="textbox"], ' +
+            '[contenteditable="true"].cell-input'
+          );
+          if (!editor) return false;
+          // Only inject if the editor is actually the active element;
+          // if focus has moved away, fall through to clipboard.
+          if (document.activeElement !== editor) return false;
+          editor.focus();
+          return document.execCommand('insertText', false, ${JSON.stringify(content)});
+        })(undefined)
+      `);
+      if (injected) return; // Successfully injected via JS — done.
+    } catch { /* Sheet context unavailable or not in edit mode — fall through */ }
+  }
+
+  // Strategy B: clipboard TSV + simulated Ctrl+V.
+  // RFC 4180 TSV quoting: wrap in double-quotes, escape internal quotes as "".
+  // Google Sheets parses this as a single-cell value even when content has \n.
   const body    = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const escaped = body.replace(/"/g, '""');
   clipboard.writeText(`"${escaped}"`);
+
   if (sheetView) {
     sheetView.webContents.focus();
     sheetView.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'V', modifiers: ['control'] });
@@ -659,9 +710,7 @@ ipcMain.handle('blocks:inject', async (_e, content) => {
 
 // ── Format-link handlers ──────────────────────────────────────────────────────
 
-ipcMain.handle('formatLinks:get', async () => {
-  return getFormatLinks();
-});
+ipcMain.handle('formatLinks:get', () => getFormatLinks());
 
 ipcMain.handle('formatLinks:set', async (_e, { format, templateId }) => {
   const links   = await getFormatLinks();
@@ -674,19 +723,16 @@ ipcMain.handle('formatLinks:set', async (_e, { format, templateId }) => {
 
 ipcMain.handle('drive:createSheet', async (_e, params) => {
   if (!oauth2Client) throw new Error('not authenticated — please sign in again');
-  try {
-    return await createFlowSheet(oauth2Client, params);
-  } catch (e) { throw friendlyError(e); }
+  try { return await createFlowSheet(oauth2Client, params); }
+  catch (e) { throw friendlyError(e); }
 });
 
 ipcMain.handle('drive:createFromTemplate', async (_e, params) => {
   if (!oauth2Client) throw new Error('not authenticated — please sign in again');
-  try {
-    return await createFlowFromTemplate(oauth2Client, params);
-  } catch (e) { throw friendlyError(e); }
+  try { return await createFlowFromTemplate(oauth2Client, params); }
+  catch (e) { throw friendlyError(e); }
 });
 
-// On-demand WRAP fix — exposed to the renderer for the palette command.
 ipcMain.handle('sheet:fixWrapping', async (_e, spreadsheetId) => {
   if (!oauth2Client) throw new Error('not authenticated — please sign in again');
   try {
@@ -695,22 +741,18 @@ ipcMain.handle('sheet:fixWrapping', async (_e, spreadsheetId) => {
   } catch (e) { throw friendlyError(e); }
 });
 
-// ── Sheet tab handler ─────────────────────────────────────────────────────────
-
 ipcMain.handle('sheet:addTab', async (_e, { spreadsheetId, tabName, format }) => {
   if (!oauth2Client) throw new Error('not authenticated — please sign in again');
   try {
     const formatLinks    = await getFormatLinks();
     const copyFirstSheet = !!(formatLinks && formatLinks[format]);
-    const result = await addFlowTab(oauth2Client, { spreadsheetId, tabName, format, copyFirstSheet });
+    const result         = await addFlowTab(oauth2Client, { spreadsheetId, tabName, format, copyFirstSheet });
 
     if (sheetView && currentSheetUrl) {
-      // Google Sheets pushes new tab data to its running client via WebSocket
-      // within ~1s of the API call. We wait 1400ms then use hash-only navigation
-      // (no page reload, no loading screen). If the JS context is unavailable
-      // we fall back to a full reload as a safety net.
-      const base    = currentSheetUrl.split('#')[0];
-      const gid     = result.sheetId;
+      const base = currentSheetUrl.split('#')[0];
+      const gid  = result.sheetId;
+      // Google Sheets pushes the new tab to its running client via WebSocket
+      // within ~1s.  We wait 1400ms then do hash-only navigation (no reload).
       setTimeout(() => {
         if (!sheetView) return;
         sheetView.webContents
@@ -719,30 +761,25 @@ ipcMain.handle('sheet:addTab', async (_e, { spreadsheetId, tabName, format }) =>
       }, 1400);
     }
     return { ...result, usedTemplate: copyFirstSheet };
-  } catch (e) {
-    throw friendlyError(e);
-  }
+  } catch (e) { throw friendlyError(e); }
 });
-
-
 
 // ── App lifecycle ─────────────────────────────────────────────────────────────
 
-// These must be set before app.whenReady() fires.
-// They prevent Chromium from throttling background renderers and help the GPU
-// process start faster on macOS (Metal backend, no block-list early-out).
+// These switches must be set before app.whenReady() fires.
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
-// Remove navigator.webdriver=true — Google's primary signal for detecting embedded browsers.
+// Disabling AutomationControlled removes navigator.webdriver=true, which is
+// Google's primary signal for detecting embedded/automated browsers.
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 
 app.whenReady().then(async () => {
   await initAuth();
   createWindow();
 
-  // Ctrl+K / Cmd+K toggles the block panel.
+  // Ctrl+K / Cmd+K — toggle the block panel.
   globalShortcut.register('CommandOrControl+K', () => {
     if (!mainWindow) return;
     panelOpen = !panelOpen;
@@ -750,20 +787,15 @@ app.whenReady().then(async () => {
     mainWindow.webContents.send('panel:toggle', panelOpen);
   });
 
-  // Ctrl+. / Cmd+. — open the panel (if closed) and focus the search input.
-  // Lets the user click a cell in the sheet, hit Ctrl+., type a query, and
-  // inject a block — without ever reaching for the mouse.
+  // Ctrl+. / Cmd+. — open the panel and focus the search input.
+  // Lets the user click a cell, hit Ctrl+., type a query, and inject a block
+  // without ever reaching for the mouse.
   //
-  // Ctrl+. / Cmd+. — open the panel (if closed) and focus the search input.
-  //
-  // Focus sequencing matters: the WebContentsView (Google Sheets) owns OS focus
-  // after injection. We must:
-  //   1. mainWindow.focus()          — grab the OS-level BrowserWindow focus
+  // Focus sequencing: WebContentsView owns OS focus after sheet interaction.
+  //   1. mainWindow.focus()             — grab OS-level focus
   //   2. mainWindow.webContents.focus() — route keyboard to the Svelte renderer
-  //   3. defer the IPC send ~50 ms   — give the OS time to process the focus
-  //      transfer before element.focus() is called in the renderer.
-  //      Without the delay, the renderer receives panel:focus-search while the
-  //      WebContentsView still owns the keyboard, so element.focus() silently fails.
+  //   3. 50ms delay on the IPC send     — let the OS process the focus transfer
+  //      before element.focus() is called in the renderer.
   globalShortcut.register('CommandOrControl+.', () => {
     if (!mainWindow) return;
     if (!panelOpen) {
@@ -783,5 +815,6 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   globalShortcut.unregisterAll();
+  killChrome(); // clean up any Chrome process launched by the auth bridge
   if (process.platform !== 'darwin') app.quit();
 });

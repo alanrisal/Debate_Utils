@@ -2,8 +2,9 @@
   import { fly } from 'svelte/transition';
   import { currentSheetUrl, currentSheetIsNative } from '../stores/sheetState.js';
   import { authState } from '../stores/auth.js';
-  import { launcherOpen, launcherMode, sheetFormat, panelOpen } from '../stores/uiState.js';
+  import { launcherOpen, launcherMode, sheetFormat, sidebarView } from '../stores/uiState.js';
   import { showToast } from '../stores/toast.js';
+  import { dispatchLocal } from '../lib/bridge.js';
 
   let inputValue    = '';
   let isFocused     = false;
@@ -27,7 +28,7 @@
     currentSheetIsNative.set(true);
     currentSheetUrl.set(entry.url);
     window.flowkit?.openSheet(entry.url);
-    window.flowkit?.addRecentSheet(entry); // bump to top
+    window.flowkit?.addRecentSheet(entry);
     inputValue = ''; isFocused = false; recentMode = false;
   }
 
@@ -40,15 +41,10 @@
     return `${d.getMonth() + 1}/${d.getDate()}`;
   }
 
-  // On macOS with titleBarStyle:'hidden' the traffic light buttons sit inside
-  // the toolbar. Reserve left space so they don't collide with toolbar content.
-  const isMac = typeof window !== 'undefined' && window.flowkit?.platform === 'darwin';
-
   // ── Search mode (input starts with '/') ───────────────────────────────────
   let searchResults = [];
   let searching     = false;
   let searchTimeout;
-
 
   $: isSearching = inputValue.startsWith('/');
 
@@ -88,7 +84,6 @@
     searchResults = [];
   }
 
-  // Move the native sheet view off-screen whenever the palette dropdown is visible.
   $: window.flowkit?.togglePalette(isFocused && (!inputValue || isSearching || isRecent));
 
   // ── Commands ──────────────────────────────────────────────────────────────
@@ -97,21 +92,52 @@
     window.flowkit?.goHome();
   }
 
+  // Open the sheet editing view — jump to most recent sheet, or show launcher.
+  async function openKit() {
+    if ($currentSheetUrl) { isFocused = false; return; } // already in editing mode
+    const recents = (await window.flowkit?.getRecentSheets()) ?? [];
+    if (recents.length > 0) {
+      const entry = recents[0];
+      currentSheetIsNative.set(true);
+      currentSheetUrl.set(entry.url);
+      window.flowkit?.openSheet(entry.url);
+      window.flowkit?.addRecentSheet(entry);
+    } else {
+      launcherMode.set('open');
+      launcherOpen.set(true);
+    }
+    isFocused = false;
+  }
+
   $: commands = [
-    ...($currentSheetUrl ? [{ id: 'home', label: 'go to home', shortcut: 'B', action: goHome }] : []),
+    { id: 'kit',  label: $currentSheetUrl ? 'kit (active)' : 'open kit', shortcut: 'K', action: openKit },
     { id: 'open', label: 'open drive library', shortcut: 'O', action: () => { launcherMode.set('open');     launcherOpen.set(true); } },
     { id: 'new',  label: 'create new flow',    shortcut: 'N', action: () => { launcherMode.set('new-flow'); launcherOpen.set(true); } },
     ...($currentSheetUrl ? [{ id: 'wrap', label: fixingWrap ? 'fixing wrap…' : 'fix row wrapping', shortcut: 'W', action: runFixWrap }] : []),
     { id: 'recent', label: 'open recent sheet',   shortcut: 'R', action: () => { recentMode = true; recentExpanded = false; isFocused = true; loadRecents(); } },
     { id: 'select', label: 'find specific sheet', shortcut: '/', action: () => { inputValue = '/'; isFocused = true; setTimeout(() => document.getElementById('topbar-input')?.focus(), 0); } },
     { id: 'exit',   label: 'terminate session',   shortcut: '⎋', action: () => window.flowkit?.closeWindow() }
-
   ];
 
   // ── Single keydown handler (on window) ────────────────────────────────────
   function handleGlobalKeydown(e) {
     const tag      = document.activeElement?.tagName;
     const isTyping = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
+    // Ctrl+\ — toggle between kit and home views.
+    if (e.key === '\\' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      sidebarView.update(v => v === 'kit' ? 'home' : 'kit');
+      return;
+    }
+
+    // Ctrl+. — focus the block search input (switch to kit view first if needed).
+    if (e.key === '.' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      sidebarView.set('kit');
+      dispatchLocal('flowkit:focusSearch');
+      return;
+    }
 
     // Ctrl+/ (Win/Linux) or Cmd+/ (Mac) toggles the palette.
     if (e.key === '/' && (e.ctrlKey || e.metaKey)) {
@@ -154,14 +180,13 @@
       if (recentMode) { recentMode = false; }
       else { isFocused = false; inputValue = ''; searchResults = []; }
     } else if (!inputValue && !isSearching && !isRecent) {
-      // Single-letter shortcuts when palette is open with no text typed
       switch (e.key.toLowerCase()) {
         case 'o': e.preventDefault(); commands.find(c => c.id === 'open')?.action(); isFocused = false; break;
         case 'n': e.preventDefault(); commands.find(c => c.id === 'new')?.action();  isFocused = false; break;
-        case 'b': e.preventDefault(); commands.find(c => c.id === 'home')?.action(); isFocused = false; break;
+        case 'k': e.preventDefault(); openKit(); break;
         case 'w': e.preventDefault(); commands.find(c => c.id === 'wrap')?.action(); isFocused = false; break;
         case '/': e.preventDefault(); commands.find(c => c.id === 'select')?.action(); break;
-        case 'r': e.preventDefault(); recentMode = true; recentExpanded = false; isFocused = true;loadRecents(); break;
+        case 'r': e.preventDefault(); recentMode = true; recentExpanded = false; isFocused = true; loadRecents(); break;
       }
     }
   }
@@ -198,7 +223,7 @@
     }
   }
 
-  // ── Format cycler + Aff / Neg tab buttons ─────────────────────────────────
+  // ── Format cycler + tab buttons ───────────────────────────────────────────
   const FORMAT_CYCLE = ['Policy', 'LD', 'PF'];
   let addingTab = false;
 
@@ -230,141 +255,147 @@
 
 <svelte:window on:keydown={handleGlobalKeydown} />
 
-<header class="orchestrator" class:mac={isMac}>
+<header class="orchestrator">
 
-  <!-- ── Left: meta / sheet controls ──────────────────────────────────── -->
-  <div class="meta">
-    {#if $currentSheetUrl}
-      <button class="home-btn" on:click={goHome}>
-        <span class="home-arrow">←</span>
-        <span class="home-label">home</span>
-      </button>
-      <div class="sheet-controls" class:busy={addingTab}>
-        <button class="fmt-btn" on:click={cycleFormat} title="Click to cycle format">
-          {$sheetFormat.toLowerCase()}
-        </button>
-        <button class="tab-btn" on:click={() => addTab('Adv')} disabled={addingTab}>+aff</button>
-        <button class="tab-btn" on:click={() => addTab('OFF')} disabled={addingTab}>+neg</button>
-        <button class="tab-btn" on:click={() => addTab('DA')} disabled={addingTab}>+DA</button>
-        <button class="tab-btn" on:click={() => addTab('T')} disabled={addingTab}>+T</button>
-        <button class="tab-btn" on:click={() => addTab('CP')} disabled={addingTab}>+CP</button>
-        <button class="tab-btn" on:click={() => addTab('K')} disabled={addingTab}>+K</button>
-
+  <!-- ── Row 1: Command palette ─────────────────────────────────────────── -->
+  <div class="top-row">
+    <div class="commander" class:active={isFocused}>
+      <div class="input-wrapper">
+        <span class="prompt">$</span>
+        <input
+          id="topbar-input"
+          type="text"
+          bind:value={inputValue}
+          on:focus={() => { isFocused = true; inputValue = ''; selectedIndex = 0; }}
+          on:blur={() => setTimeout(() => { isFocused = false; }, 200)}
+          placeholder={isFocused ? 'select command, paste link, or / to search…' : 'ctrl+/ commands'}
+          spellcheck="false"
+        />
       </div>
-    {:else}
-      <span class="system-status"></span>
-      <span class="app-name">flowkit <span class="version">v1.0.4</span></span>
-    {/if}
-  </div>
 
-  <!-- ── Center: commander ─────────────────────────────────────────────── -->
-  <div class="commander" class:active={isFocused}>
-    <div class="input-wrapper">
-      <span class="prompt">$</span>
-      <input
-        id="topbar-input"
-        type="text"
-        bind:value={inputValue}
-        on:focus={() => { isFocused = true; inputValue = ''; selectedIndex = 0; }}
-        on:blur={() => setTimeout(() => { isFocused = false; }, 200)}
-        placeholder={isFocused ? 'select command, paste link, or / to search…' : (isMac ? 'cmd+/ open commands' : 'ctrl+/ open commands')}
-        spellcheck="false"
-      />
-    </div>
-
-    {#if isFocused && (!inputValue || isRecent)}
-      <!-- svelte-ignore a11y-no-static-element-interactions -->
-      <div class="palette" in:fly={{ y: -5, duration: 100 }} on:mousedown|preventDefault>
-        {#if isRecent}
-          {#if recentSheets.length === 0}
-            <div class="palette-msg">no recent sheets yet</div>
+      {#if isFocused && (!inputValue || isRecent)}
+        <!-- svelte-ignore a11y-no-static-element-interactions -->
+        <div class="palette" in:fly={{ y: -5, duration: 100 }} on:mousedown|preventDefault>
+          {#if isRecent}
+            {#if recentSheets.length === 0}
+              <div class="palette-msg">no recent sheets yet</div>
+            {:else}
+              <div class="palette-section-label">recent</div>
+              {#each visibleRecents as entry, i}
+                <!-- svelte-ignore a11y-click-events-have-key-events -->
+                <button
+                  class="palette-item"
+                  class:selected={i === selectedIndex}
+                  on:click={() => openRecent(entry)}
+                  on:mouseenter={() => (selectedIndex = i)}
+                >
+                  <span class="cmd-label"><span class="file-icon">⊞</span>{entry.name}</span>
+                  <span class="cmd-shortcut recent-date">{fmtDate(entry.openedAt)}</span>
+                </button>
+              {/each}
+              {#if recentSheets.length > 5 && !recentExpanded}
+                <!-- svelte-ignore a11y-click-events-have-key-events -->
+                <button class="palette-more" on:click={() => { recentExpanded = true; }}>
+                  ▾ show {recentSheets.length - 5} more
+                </button>
+              {/if}
+            {/if}
           {:else}
-            <div class="palette-section-label">recent</div>
-            {#each visibleRecents as entry, i}
+            {#each commands as cmd, i}
               <!-- svelte-ignore a11y-click-events-have-key-events -->
               <button
                 class="palette-item"
                 class:selected={i === selectedIndex}
-                on:click={() => openRecent(entry)}
+                on:click={cmd.action}
                 on:mouseenter={() => (selectedIndex = i)}
               >
-                <span class="cmd-label"><span class="file-icon">⊞</span>{entry.name}</span>
-                <span class="cmd-shortcut recent-date">{fmtDate(entry.openedAt)}</span>
+                <span class="cmd-label">{cmd.label}</span>
+                <span class="cmd-shortcut">{cmd.shortcut}</span>
               </button>
             {/each}
-            {#if recentSheets.length > 5 && !recentExpanded}
-              <!-- svelte-ignore a11y-click-events-have-key-events -->
-              <button class="palette-more" on:click={() => { recentExpanded = true; }}>
-                ▾ show {recentSheets.length - 5} more
-              </button>
-            {/if}
           {/if}
-        {:else}
-          {#each commands as cmd, i}
-            <!-- svelte-ignore a11y-click-events-have-key-events -->
-            <button
-              class="palette-item"
-              class:selected={i === selectedIndex}
-              on:click={cmd.action}
-              on:mouseenter={() => (selectedIndex = i)}
-            >
-              <span class="cmd-label">{cmd.label}</span>
-              <span class="cmd-shortcut">{cmd.shortcut}</span>
-            </button>
-          {/each}
-        {/if}
-      </div>
-    {/if}
-    {#if isSearching}
-      <!-- svelte-ignore a11y-no-static-element-interactions -->
-      <div class="palette" in:fly={{ y: -5, duration: 100 }} on:mousedown|preventDefault>
-        {#if searching}
-          <div class="palette-msg">searching drive…</div>
-        {:else if searchResults.length > 0}
-          {#each searchResults as file, i}
-            <!-- svelte-ignore a11y-click-events-have-key-events -->
-            <button
-              class="palette-item"
-              class:selected={i === selectedIndex}
-              on:click={() => openSearchResult(file)}
-              on:mouseenter={() => (selectedIndex = i)}
-            >
-              <span class="cmd-label"><span class="file-icon">⊞</span>{file.name}</span>
-              <span class="cmd-shortcut">open</span>
-            </button>
-          {/each}
-        {:else if inputValue.length > 1}
-          <div class="palette-msg">no sheets found for "{inputValue.slice(1)}"</div>
-        {:else}
-          <div class="palette-msg">type to search your drive…</div>
-        {/if}
-      </div>
-    {/if}
-  </div>
+        </div>
+      {/if}
+      {#if isSearching}
+        <!-- svelte-ignore a11y-no-static-element-interactions -->
+        <div class="palette" in:fly={{ y: -5, duration: 100 }} on:mousedown|preventDefault>
+          {#if searching}
+            <div class="palette-msg">searching drive…</div>
+          {:else if searchResults.length > 0}
+            {#each searchResults as file, i}
+              <!-- svelte-ignore a11y-click-events-have-key-events -->
+              <button
+                class="palette-item"
+                class:selected={i === selectedIndex}
+                on:click={() => openSearchResult(file)}
+                on:mouseenter={() => (selectedIndex = i)}
+              >
+                <span class="cmd-label"><span class="file-icon">⊞</span>{file.name}</span>
+                <span class="cmd-shortcut">open</span>
+              </button>
+            {/each}
+          {:else if inputValue.length > 1}
+            <div class="palette-msg">no sheets found for "{inputValue.slice(1)}"</div>
+          {:else}
+            <div class="palette-msg">type to search your drive…</div>
+          {/if}
+        </div>
+      {/if}
+    </div>
 
-  <!-- ── Right: identity ───────────────────────────────────────────────── -->
-  <div class="identity">
-    <button
-      class="panel-toggle"
-      class:panel-active={$panelOpen}
-      on:click={() => window.flowkit?.togglePanel()}
-      title="Toggle block panel (Ctrl+K)"
-    >
-      <span class="panel-icon"></span>
-      <span class="panel-label">blocks</span>
-    </button>
-
-    {#if $authState.loggedIn}
-      <button class="user-pill" on:click={() => launcherOpen.set(true)}>
-        <span class="user-id">{$authState.userInfo?.email.split('@')[0]}</span>
-        <span class="status-online"></span>
-      </button>
-    {:else}
-      <button class="auth-trigger" on:click={() => launcherOpen.set(true)}>authenticate</button>
-    {/if}
-    <button class="close-trigger" on:click={() => window.flowkit?.closeWindow()}>
+    <button class="close-trigger" on:click={() => window.flowkit?.closeWindow()} title="Close">
       <div class="close-icon"></div>
     </button>
+  </div>
+
+  <!-- ── Row 2: Context controls ────────────────────────────────────────── -->
+  <div class="bottom-row">
+    <div class="controls-left">
+      {#if $currentSheetUrl}
+        <!-- View toggle: switches between kit (blocks) and home (manage) without
+             clearing the sheet URL or reloading the tab. -->
+        {#if $sidebarView === 'kit'}
+          <button class="home-btn" on:click={() => sidebarView.set('home')} title="Manage templates & tubs">manage</button>
+          <button class="fmt-btn" on:click={cycleFormat} title="Cycle format">
+            {$sheetFormat.toLowerCase()}
+          </button>
+          <div class="tab-strip" class:busy={addingTab}>
+            <button class="tab-btn" on:click={() => addTab('Adv')} disabled={addingTab}>+aff</button>
+            <button class="tab-btn" on:click={() => addTab('OFF')} disabled={addingTab}>+neg</button>
+            <button class="tab-btn" on:click={() => addTab('DA')}  disabled={addingTab}>+DA</button>
+            <button class="tab-btn" on:click={() => addTab('T')}   disabled={addingTab}>+T</button>
+            <button class="tab-btn" on:click={() => addTab('CP')}  disabled={addingTab}>+CP</button>
+            <button class="tab-btn" on:click={() => addTab('K')}   disabled={addingTab}>+K</button>
+          </div>
+        {:else}
+          <button class="home-btn kit-btn" on:click={() => sidebarView.set('kit')} title="Back to flow kit">← kit</button>
+          <button class="fmt-btn" on:click={cycleFormat} title="Cycle format">
+            {$sheetFormat.toLowerCase()}
+          </button>
+          <div class="tab-strip" class:busy={addingTab}>
+            <button class="tab-btn" on:click={() => addTab('Adv')} disabled={addingTab}>+aff</button>
+            <button class="tab-btn" on:click={() => addTab('OFF')} disabled={addingTab}>+neg</button>
+            <button class="tab-btn" on:click={() => addTab('DA')}  disabled={addingTab}>+DA</button>
+            <button class="tab-btn" on:click={() => addTab('T')}   disabled={addingTab}>+T</button>
+            <button class="tab-btn" on:click={() => addTab('CP')}  disabled={addingTab}>+CP</button>
+            <button class="tab-btn" on:click={() => addTab('K')}   disabled={addingTab}>+K</button>
+          </div>
+        {/if}
+      {:else}
+        <span class="app-name">flowkit <span class="version">v1.0.4</span></span>
+      {/if}
+    </div>
+
+    <div class="controls-right">
+      {#if $authState.loggedIn}
+        <button class="user-pill" on:click={() => launcherOpen.set(true)}>
+          <span class="user-id">{$authState.userInfo?.email.split('@')[0]}</span>
+          <span class="status-online"></span>
+        </button>
+      {:else}
+        <button class="auth-trigger" on:click={() => launcherOpen.set(true)}>sign in</button>
+      {/if}
+    </div>
   </div>
 
 </header>
@@ -383,118 +414,41 @@
   .orchestrator {
     position: fixed;
     top: 0; left: 0; right: 0;
-    height: 46px;
     background: var(--bg);
     border-bottom: 1px solid var(--border);
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 16px;
+    flex-direction: column;
     font-family: var(--font-mono);
-    -webkit-app-region: drag;
     z-index: 1000;
   }
-  /* Push left content past the macOS traffic light buttons (≈68px wide at x:14) */
-  .orchestrator.mac {
-    padding-left: 78px;
-  }
 
-  /* ── Left ─────────────────────────────────────────────────────────────── */
-  .meta {
+  /* ── Row 1: Palette ────────────────────────────────────────────────────── */
+  .top-row {
+    height: 40px;
     display: flex;
     align-items: center;
-    gap: 8px;
-    min-width: 220px;
+    padding: 0 8px;
+    gap: 6px;
+    border-bottom: 1px solid var(--border);
   }
 
-  .system-status { width: 9px; height: 9px; border: 1px solid var(--text-dim); }
-  .app-name { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text-main); }
-  .version { color: var(--text-dim); font-weight: 400; margin-left: 4px; }
-
-  .home-btn {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    background: #0f0f1a;
-    border: 1px solid #2a2a4a;
-    border-radius: 3px;
-    color: #8888cc;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    padding: 4px 10px 4px 8px;
-    cursor: pointer;
-    letter-spacing: 0.04em;
-    transition: background 0.12s, border-color 0.12s, color 0.12s;
-    -webkit-app-region: no-drag;
-  }
-  .home-btn:hover { background: #141426; border-color: #5555aa; color: #aaaaee; }
-  .home-arrow { font-size: 13px; line-height: 1; }
-  .home-label { text-transform: lowercase; letter-spacing: 0.06em; }
-
-  .sheet-controls {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    -webkit-app-region: no-drag;
-  }
-  .sheet-controls.busy { opacity: 0.55; pointer-events: none; }
-
-  .fmt-btn {
-    background: none;
-    border: 1px solid #252535;
-    border-radius: 2px;
-    color: #555577;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 0.06em;
-    padding: 3px 8px;
-    cursor: pointer;
-    text-transform: lowercase;
-    transition: border-color 0.12s, color 0.12s;
-  }
-  .fmt-btn:hover { border-color: #4444aa; color: #9999dd; }
-
-  .tab-btn {
-    background: none;
-    border: 1px solid #252535;
-    border-radius: 2px;
-    color: #b9b9bf;
-    font-family: var(--font-mono);
-    font-size: 13px;
-    padding: 3px 8px;
-    cursor: pointer;
-    letter-spacing: 0.05em;
-    transition: border-color 0.12s, color 0.12s, background 0.12s;
-  }
-  .tab-btn:hover:not(:disabled) {
-    border-color: #5555aa;
-    color: #aaaaee;
-    background: #0f0f1a;
-    transform: scale(1.12) translateY(-2px);
-  }
-  .tab-btn:disabled { opacity: 0.4; cursor: default; }
-
-  /* ── Center ───────────────────────────────────────────────────────────── */
   .commander {
     position: relative;
-    width: 440px;
-    flex-shrink: 0;
-    transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-    -webkit-app-region: no-drag;
+    flex: 1;
+    min-width: 0;
   }
-  .commander.active { width: 520px; }
 
   .input-wrapper {
     background: var(--surface);
     border: 1px solid var(--border);
-    height: 30px;
+    height: 28px;
     display: flex;
     align-items: center;
-    padding: 0 12px;
-    gap: 8px;
+    padding: 0 10px;
+    gap: 7px;
   }
 
-  .prompt { color: var(--text-dim); font-size: 14px; }
+  .prompt { color: var(--text-dim); font-size: 13px; }
 
   input {
     flex: 1;
@@ -502,20 +456,21 @@
     border: none;
     color: var(--text-main);
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: 12px;
     outline: none;
+    min-width: 0;
   }
   input::placeholder { color: var(--text-dim); text-transform: lowercase; }
 
   /* ── Palette dropdown ─────────────────────────────────────────────────── */
   .palette {
     position: absolute;
-    top: 36px; left: 0; right: 0;
+    top: 34px; left: 0; right: 0;
     background: var(--bg);
     border: 1px solid var(--border);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
     padding: 4px;
-    z-index: 10;
+    z-index: 100;
   }
 
   .palette-item {
@@ -523,7 +478,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 8px 12px;
+    padding: 7px 10px;
     background: none;
     border: none;
     font-family: var(--font-mono);
@@ -535,117 +490,47 @@
   .palette-item.selected .cmd-label,
   .palette-item.selected .cmd-shortcut { color: #000; }
 
-  .cmd-label    { color: var(--text-main); font-size: 13px; text-transform: lowercase; }
-  .cmd-shortcut { color: var(--text-dim);  font-size: 12px; }
+  .cmd-label    { color: var(--text-main); font-size: 12px; text-transform: lowercase; }
+  .cmd-shortcut { color: var(--text-dim);  font-size: 11px; flex-shrink: 0; margin-left: 8px; }
 
   .palette-msg {
-    padding: 10px 12px;
-    font-size: 12px;
+    padding: 8px 10px;
+    font-size: 11px;
     color: var(--text-dim);
     text-transform: lowercase;
   }
 
-  .file-icon { color: #1a73e8; margin-right: 6px; font-size: 13px; }
+  .file-icon { color: #1a73e8; margin-right: 5px; font-size: 12px; }
 
   .palette-section-label {
-    padding: 6px 12px 3px;
-    font-size: 10px;
+    padding: 5px 10px 3px;
+    font-size: 9px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
     color: var(--text-dim);
   }
 
-  .recent-date { font-size: 11px; color: var(--text-dim); }
+  .recent-date { font-size: 10px; color: var(--text-dim); }
   .palette-item.selected .recent-date { color: #555; }
 
   .palette-more {
     width: 100%;
-    padding: 7px 12px;
+    padding: 6px 10px;
     background: none;
     border: none;
     border-top: 1px solid var(--border);
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 10px;
     color: var(--text-dim);
     text-align: left;
     cursor: pointer;
-    letter-spacing: 0.04em;
   }
   .palette-more:hover { color: var(--text-main); }
 
-  /* ── Right ────────────────────────────────────────────────────────────── */
-  .identity {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    min-width: 220px;
-    justify-content: flex-end;
-    -webkit-app-region: no-drag;
-  }
-
-  .panel-toggle {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    background: none;
-    border: 1px solid #252535;
-    border-radius: 2px;
-    color: #555577;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 0.06em;
-    padding: 4px 10px;
-    cursor: pointer;
-    transition: border-color 0.12s, color 0.12s, background 0.12s;
-  }
-  .panel-toggle:hover { border-color: #4444aa; color: #9999dd; }
-  .panel-toggle.panel-active {
-    border-color: #5555cc;
-    color: #aaaaff;
-    background: #0d0d1a;
-  }
-
-  .panel-icon {
-    width: 10px;
-    height: 10px;
-    border: 1px solid currentColor;
-    border-radius: 1px;
-    position: relative;
-    flex-shrink: 0;
-  }
-  /* Right-side stripe to suggest the panel position */
-  .panel-icon::after {
-    content: '';
-    position: absolute;
-    top: 0; right: 0; bottom: 0;
-    width: 3px;
-    background: currentColor;
-    border-radius: 0 1px 1px 0;
-  }
-  .panel-label { text-transform: lowercase; }
-
-  .user-pill {
-    background: none; border: none;
-    display: flex; align-items: center; gap: 8px;
-    cursor: pointer; padding: 4px;
-  }
-  .user-id { color: var(--text-main); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; }
-  .status-online { width: 4px; height: 4px; background: var(--accent); }
-
-  .auth-trigger {
-    background: transparent;
-    border: 1px solid var(--text-dim);
-    color: var(--text-dim);
-    font-size: 12px;
-    font-family: var(--font-mono);
-    padding: 3px 10px;
-    cursor: pointer;
-  }
-  .auth-trigger:hover { border-color: var(--accent); color: var(--accent); }
-
+  /* ── Close button (top-row right) ─────────────────────────────────────── */
   .close-trigger {
     background: none; border: none; cursor: pointer;
-    width: 20px; height: 20px;
+    width: 20px; height: 20px; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
   }
   .close-icon {
@@ -663,4 +548,136 @@
   }
   .close-trigger:hover .close-icon,
   .close-trigger:hover .close-icon::after { background: #ff4545; }
+
+  /* ── Row 2: Context controls ───────────────────────────────────────────── */
+  .bottom-row {
+    height: 32px;
+    display: flex;
+    align-items: center;
+    padding: 0 6px;
+    gap: 6px;
+    justify-content: space-between;
+  }
+
+  .controls-left {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .controls-left::-webkit-scrollbar { display: none; }
+
+  .controls-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .app-name {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-main);
+    white-space: nowrap;
+  }
+  .version { color: var(--text-dim); font-weight: 400; margin-left: 3px; }
+
+  .home-btn {
+    background: #0f0f1a;
+    border: 1px solid #2a2a4a;
+    border-radius: 3px;
+    color: #8888cc;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 2px 7px;
+    cursor: pointer;
+    flex-shrink: 0;
+    white-space: nowrap;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+  }
+  .home-btn:hover { background: #141426; border-color: #5555aa; color: #aaaaee; }
+  /* "← kit" button has a slightly different tint to signal return navigation */
+  .kit-btn { color: #aaaacc; border-color: #3a3a5a; }
+
+  .fmt-btn {
+    background: none;
+    border: 1px solid #252535;
+    border-radius: 2px;
+    color: #555577;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    padding: 2px 6px;
+    cursor: pointer;
+    text-transform: lowercase;
+    flex-shrink: 0;
+    transition: border-color 0.12s, color 0.12s;
+    white-space: nowrap;
+  }
+  .fmt-btn:hover { border-color: #4444aa; color: #9999dd; }
+
+  .tab-strip {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+  }
+  .tab-strip.busy { opacity: 0.55; pointer-events: none; }
+
+  .tab-btn {
+    background: none;
+    border: 1px solid #252535;
+    border-radius: 2px;
+    color: #b9b9bf;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 2px 5px;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: border-color 0.12s, color 0.12s, background 0.12s;
+  }
+  .tab-btn:hover:not(:disabled) {
+    border-color: #5555aa;
+    color: #aaaaee;
+    background: #0f0f1a;
+  }
+  .tab-btn:disabled { opacity: 0.4; cursor: default; }
+
+  /* ── Identity (right side of bottom row) ──────────────────────────────── */
+  .user-pill {
+    background: none; border: none;
+    display: flex; align-items: center; gap: 5px;
+    cursor: pointer; padding: 2px;
+  }
+  .user-id {
+    color: var(--text-main);
+    font-size: 11px;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    white-space: nowrap;
+    max-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: var(--font-mono);
+  }
+  .status-online { width: 4px; height: 4px; background: var(--accent); flex-shrink: 0; }
+
+  .auth-trigger {
+    background: transparent;
+    border: 1px solid var(--text-dim);
+    color: var(--text-dim);
+    font-size: 10px;
+    font-family: var(--font-mono);
+    padding: 2px 7px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .auth-trigger:hover { border-color: var(--accent); color: var(--accent); }
 </style>

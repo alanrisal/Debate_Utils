@@ -1,56 +1,74 @@
 <script>
   import { onMount, tick } from 'svelte';
-  import Toolbar     from './components/Toolbar.svelte';
-  import Launcher    from './components/Launcher.svelte';
-  import Home        from './components/Home.svelte';
-  import BlockPanel  from './components/BlockPanel.svelte';
-  import Toast       from './lib/alert.svelte';
-  import { launcherOpen, panelOpen } from './stores/uiState.js';
+  import Toolbar    from './components/Toolbar.svelte';
+  import Launcher   from './components/Launcher.svelte';
+  import Home       from './components/Home.svelte';
+  import BlockPanel from './components/BlockPanel.svelte';
+  import Toast      from './lib/alert.svelte';
+  import { launcherOpen, sidebarView } from './stores/uiState.js';
+  import { currentSheetUrl } from './stores/sheetState.js';
+  import { authState } from './stores/auth.js';
   import { showToast } from './stores/toast.js';
 
-  let blockPanel = null;   // bound to BlockPanel instance for focusSearch()
-  import { currentSheetUrl } from './stores/sheetState.js';
+  let blockPanel = null;   // bound to BlockPanel for focusSearch()
+
+  // Auto-switch view when the active tab changes.
+  // Opening a sheet → kit view.  Closing it / navigating away → home view.
+  // The user can also manually toggle with toolbar buttons / palette command.
+  let _prevUrl = '';
+  $: {
+    if ($currentSheetUrl && !_prevUrl) sidebarView.set('kit');
+    if (!$currentSheetUrl)             sidebarView.set('home');
+    _prevUrl = $currentSheetUrl;
+  }
 
   onMount(() => {
-    if (!window.flowkit) return;
+    window.flowkit?.parseAllTubs?.();
 
-    // Warm up the tub cache in the background so the panel loads instantly.
-    window.flowkit.parseAllTubs?.();
-
-    // Main process sends this when Ctrl+K is pressed or the toolbar button fires.
-    const unsubPanel = window.flowkit.onPanelToggle((isOpen) => {
-      panelOpen.set(isOpen);
+    // Sync the current Sheets tab URL into the store on sidebar open.
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const url = tabs?.[0]?.url || '';
+      if (url.includes('docs.google.com/spreadsheets')) currentSheetUrl.set(url);
     });
 
-    // Ctrl+. — open panel if needed then immediately focus the search input.
+    function onTabUpdate(tabId, info, tab) {
+      if (info.status !== 'complete') return;
+      chrome.tabs.query({ active: true, currentWindow: true }, (activeTabs) => {
+        if (activeTabs[0]?.id !== tabId) return;
+        const url = tab.url || '';
+        currentSheetUrl.set(url.includes('docs.google.com/spreadsheets') ? url : '');
+      });
+    }
+    function onTabActivated() {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const url = tabs?.[0]?.url || '';
+        currentSheetUrl.set(url.includes('docs.google.com/spreadsheets') ? url : '');
+      });
+    }
+
+    chrome.tabs.onUpdated.addListener(onTabUpdate);
+    chrome.tabs.onActivated.addListener(onTabActivated);
+
+    // Focus the block search input (Ctrl+. shortcut from Toolbar).
     const unsubFocus = window.flowkit.onPanelFocusSearch(async () => {
-      if (!$panelOpen) panelOpen.set(true);
-      await tick();   // wait for BlockPanel to mount if it just became visible
+      if ($sidebarView !== 'kit') {
+        sidebarView.set('kit');
+        await tick();
+      }
+      await tick();
       blockPanel?.focusSearch();
     });
 
-    // Keep the native sheet view in sync with the launcher open/closed state.
-    // The sheet view (WebContentsView) sits above Svelte content in the OS layer,
-    // so main must move it off-screen whenever our Svelte overlay is visible.
-    const unsubLauncher = launcherOpen.subscribe((isOpen) => {
-      window.flowkit.toggleLauncher(isOpen);
-    });
-
-    // Google's CEF detection blocked sign-in inside the sheet view.
-    // Tell the user to sign in via the FlowKit button instead.
-    const unsubCef = window.flowkit.onCefBlocked?.(() => {
-      showToast(
-        'google blocked sign-in in embedded view — use the sign in button in the top bar',
-        'error',
-        7000
-      );
+    const unsubAuth = window.flowkit.onAuthComplete(async (data) => {
+      authState.set({ loggedIn: data.loggedIn, userInfo: data.userInfo });
+      if (data.loggedIn) showToast('Signed in to Google', 'success', 3000);
     });
 
     return () => {
-      unsubPanel();
+      chrome.tabs.onUpdated.removeListener(onTabUpdate);
+      chrome.tabs.onActivated.removeListener(onTabActivated);
       unsubFocus();
-      unsubLauncher();
-      unsubCef?.();
+      unsubAuth();
     };
   });
 </script>
@@ -58,20 +76,14 @@
 <div class="shell">
   <Toolbar />
 
-  <!-- The WebContentsView (Google Sheet) renders beneath this layer,
-       positioned by main.cjs to start at --toolbar-h px from the top.
-       This div fills that same space so clicks pass through to the sheet. -->
-  <div class="sheet-area" aria-hidden="true" />
-
-  {#if $panelOpen}
-    <aside class="panel">
+  <!-- Full-width content area: either the block panel (kit) or the home screen -->
+  <main class="content">
+    {#if $sidebarView === 'kit'}
       <BlockPanel bind:this={blockPanel} />
-    </aside>
-  {/if}
-
-  {#if !$currentSheetUrl}
-    <Home />
-  {/if}
+    {:else}
+      <Home />
+    {/if}
+  </main>
 
   {#if $launcherOpen}
     <Launcher />
@@ -82,35 +94,23 @@
 
 <style>
   .shell {
-    width: 100vw;
+    width: 100%;
     height: 100vh;
     overflow: hidden;
-    background: transparent;
+    background: var(--bg, #0e0e0e);
+    display: flex;
+    flex-direction: column;
   }
 
-  /* Transparent click-through region for the embedded sheet */
-  .sheet-area {
+  /* Content area fills all space below the fixed toolbar */
+  .content {
     position: fixed;
-    top: var(--toolbar-h);
+    top: var(--toolbar-h, 72px);
     left: 0;
     right: 0;
     bottom: 0;
-    pointer-events: none;
-  }
-
-  /* Block panel — fixed right column, above the sheet view */
-  .panel {
-    position: fixed;
-    top: var(--toolbar-h);
-    right: 0;
-    width: var(--panel-w);
-    bottom: 0;
-    background: var(--panel-bg);
-    border-left: 1px solid var(--border);
-    z-index: 50;
     display: flex;
     flex-direction: column;
     overflow: hidden;
   }
-
 </style>
